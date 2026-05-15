@@ -12,7 +12,6 @@ export type HolodexChannel = {
   org?: string
   group?: string
   suborg?: string
-  photo?: string
   twitch?: string
 }
 

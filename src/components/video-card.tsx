@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react"
+import { memo, useEffect, useMemo, useState, useSyncExternalStore } from "react"
 import { Clock, Radio } from "lucide-react"
 
 import type { HolodexVideo } from "@/lib/types"
@@ -15,7 +15,6 @@ import {
   videoImage,
   videoTitle,
 } from "@/lib/video-utils"
-import { AspectRatio } from "@/components/ui/aspect-ratio"
 import { Badge } from "@/components/ui/badge"
 import {
   Card,
@@ -113,7 +112,13 @@ function formatUpcomingTime(video: HolodexVideo, now: number) {
   }).format(time)
 }
 
-export function VideoCard({ video }: { video: HolodexVideo }) {
+function VideoCardComponent({
+  video,
+  eagerThumbnail = false,
+}: {
+  video: HolodexVideo
+  eagerThumbnail?: boolean
+}) {
   const [now, setNow] = useState(0)
   const clickedVideoSnapshot = useSyncExternalStore(
     subscribeClickedVideos,
@@ -177,29 +182,30 @@ export function VideoCard({ video }: { video: HolodexVideo }) {
       }}
       onDragStart={(event) => event.preventDefault()}
     >
-      <AspectRatio
-        ratio={16 / 9}
-        className="relative overflow-hidden rounded-t-xl"
-      >
+      <div className="isolate relative aspect-video w-full overflow-hidden rounded-t-xl bg-muted">
         {image ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img
             src={image}
+            width={640}
+            height={360}
             alt=""
+            decoding="async"
             draggable={false}
-            loading="lazy"
-            className="h-full w-full select-none object-cover"
+            fetchPriority={eagerThumbnail ? "high" : "auto"}
+            loading={eagerThumbnail ? "eager" : "lazy"}
+            className="video-card-thumbnail"
           />
         ) : null}
         {durationText ? (
           <Badge
             variant="secondary"
-            className="pointer-events-none absolute right-2 bottom-2 h-6 rounded-md border-0 bg-black/75 px-2 text-xs font-medium text-white shadow-sm hover:bg-black/75"
+            className="pointer-events-none absolute right-2 bottom-2 z-[1] h-6 rounded-md border-0 bg-black/75 px-2 text-xs font-medium text-white shadow-sm transition-none hover:bg-black/75"
           >
             {durationText}
           </Badge>
         ) : null}
-      </AspectRatio>
+      </div>
       <CardHeader className="pb-2.5">
         <CardTitle className="line-clamp-2 min-h-[2lh]">
           <a
@@ -268,3 +274,5 @@ export function VideoCard({ video }: { video: HolodexVideo }) {
     </Card>
   )
 }
+
+export const VideoCard = memo(VideoCardComponent)

@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { Building2, ChevronDown, RotateCcw } from "lucide-react"
 
 import type { Org } from "@/lib/types"
@@ -40,6 +40,44 @@ type HomeOrgMultiSelectProps = {
 
 const allSelectionKey = "__all_selection__"
 
+function orgCountLabel(count: number) {
+  return `${count} ${count === 1 ? "Org" : "Orgs"}`
+}
+
+function buildOrgSelectionLabel(
+  selectedNames: string[],
+  emptySelectionLabel: string,
+  labelWidth: number,
+  font: string
+) {
+  if (selectedNames.length === 0) return emptySelectionLabel
+
+  const selectedLabels = selectedNames.map((name) => formatOrgDisplayName(name))
+  if (!labelWidth || typeof document === "undefined") {
+    return selectedLabels.join(" + ")
+  }
+
+  const canvas = document.createElement("canvas")
+  const context = canvas.getContext("2d")
+  if (!context) return selectedLabels.join(" + ")
+  context.font = font
+
+  const fits = (label: string) => context.measureText(label).width <= labelWidth
+  if (fits(selectedLabels.join(" + "))) return selectedLabels.join(" + ")
+
+  for (
+    let visibleCount = selectedLabels.length - 1;
+    visibleCount >= 1;
+    visibleCount--
+  ) {
+    const remainingCount = selectedLabels.length - visibleCount
+    const label = `${selectedLabels.slice(0, visibleCount).join(" + ")} + ${orgCountLabel(remainingCount)}`
+    if (fits(label)) return label
+  }
+
+  return orgCountLabel(selectedNames.length)
+}
+
 export function HomeOrgMultiSelect({
   orgs,
   orgsLoading,
@@ -54,6 +92,11 @@ export function HomeOrgMultiSelect({
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState("")
   const [draftSelectedNames, setDraftSelectedNames] = useState<string[]>([])
+  const [labelMetrics, setLabelMetrics] = useState({
+    font: "",
+    width: 0,
+  })
+  const labelRef = useRef<HTMLSpanElement>(null)
 
   useEffect(() => {
     if (!orgs.length) void fetchOrgs()
@@ -108,16 +151,34 @@ export function HomeOrgMultiSelect({
     )
   }, [selectableOrgs, search])
 
-  const triggerLabel = useMemo(() => {
-    if (selectedNames.length === 0) return emptySelectionLabel
-    if (selectedNames.length === 1) {
-      return formatOrgDisplayName(selectedNames[0])
+  useLayoutEffect(() => {
+    const label = labelRef.current
+    if (!label) return
+
+    const updateLabelMetrics = () => {
+      const style = window.getComputedStyle(label)
+      setLabelMetrics({
+        font: style.font,
+        width: label.getBoundingClientRect().width,
+      })
     }
-    if (selectedNames.length === 2) {
-      return selectedNames.map((name) => formatOrgDisplayName(name)).join(" + ")
-    }
-    return `${selectedNames.length} Orgs`
-  }, [emptySelectionLabel, selectedNames])
+
+    updateLabelMetrics()
+    const observer = new ResizeObserver(updateLabelMetrics)
+    observer.observe(label)
+    return () => observer.disconnect()
+  }, [])
+
+  const triggerLabel = useMemo(
+    () =>
+      buildOrgSelectionLabel(
+        selectedNames,
+        emptySelectionLabel,
+        labelMetrics.width,
+        labelMetrics.font
+      ),
+    [emptySelectionLabel, labelMetrics.font, labelMetrics.width, selectedNames]
+  )
 
   async function openSelector() {
     if (!orgs.length) await fetchOrgs()
@@ -167,7 +228,7 @@ export function HomeOrgMultiSelect({
           className="h-8 w-52 min-w-0 shrink justify-start gap-1.5 px-2.5 md:w-72"
         >
           <Building2 className="shrink-0" />
-          <span className="min-w-0 flex-1 truncate text-left">
+          <span ref={labelRef} className="min-w-0 flex-1 truncate text-left">
             {triggerLabel}
           </span>
           <ChevronDown className="ml-auto shrink-0" />
@@ -176,6 +237,7 @@ export function HomeOrgMultiSelect({
       <PopoverContent
         align="start"
         className="w-[var(--radix-popover-trigger-width)] max-w-[calc(100vw-1rem)] p-0"
+        onOpenAutoFocus={(event) => event.preventDefault()}
       >
         <Command shouldFilter={false}>
           <CommandInput

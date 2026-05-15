@@ -104,16 +104,12 @@ export function videoTitle(video: HolodexVideo) {
   return decodeHTMLEntities(video.title || "")
 }
 
-export function getVideoThumbnails(ytVideoKey: string, useWebP = false) {
-  const base = `https://i.ytimg.com/vi${useWebP ? "_webp" : ""}/${ytVideoKey}`
-  const ext = useWebP ? "webp" : "jpg"
-  const src = (q: string) => `${base}/${q}.${ext}`
-  return {
-    default: src("default"),
-    medium: src("mqdefault"),
-    standard: src("sddefault"),
-    maxres: src("maxresdefault"),
-  }
+function isYoutubeVideoId(value?: string) {
+  return Boolean(value && /^[\w-]{11}$/.test(value))
+}
+
+function youtubeThumbnailUrl(videoId: string) {
+  return `https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/sddefault.jpg`
 }
 
 export function staticThumbnailPath(
@@ -128,23 +124,20 @@ export function staticThumbnailPath(
   return `/statics/thumbnail/${size}/${encoded}.jpg`
 }
 
-export function channelPhoto(channelId?: string, size = 150) {
-  return channelId ? `/statics/channelImg/${channelId}/${size}.png` : ""
-}
-
 export function videoImage(video: HolodexVideo) {
   if (!video) return ""
-  if (video.thumbnail) return staticThumbnailPath(video.thumbnail)
+  if (video.thumbnail && video.type === "placeholder") {
+    return staticThumbnailPath(video.thumbnail)
+  }
+
   const twitchLogin = getTwitchLogin(video)
   if (twitchLogin) {
     return `https://static-cdn.jtvnw.net/previews-ttv/live_user_${encodeURIComponent(
       twitchLogin
     )}-640x360.jpg`
   }
-  if (video.type === "placeholder") {
-    return channelPhoto(video.channel_id || video.channel?.id)
-  }
-  return getVideoThumbnails(video.id).standard
+  if (isYoutubeVideoId(video.id)) return youtubeThumbnailUrl(video.id)
+  return video.thumbnail ? staticThumbnailPath(video.thumbnail) : ""
 }
 
 export function channelDisplayName(video: HolodexVideo) {

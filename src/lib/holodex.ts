@@ -2,10 +2,6 @@ import type { HolodexVideo, Org } from "@/lib/types"
 import { normalizeOrgs } from "@/lib/orgs"
 import { dedupeVideos, isLiveInsideScheduleWindow } from "@/lib/video-utils"
 
-type FetchAllLiveOptions = {
-  onPartial?: (videos: HolodexVideo[]) => void
-}
-
 function qs(obj: Record<string, unknown> = {}) {
   const params = new URLSearchParams()
   for (const [key, value] of Object.entries(obj)) {
@@ -42,24 +38,15 @@ export async function fetchLive(
 
 export async function fetchAllLive(
   orgs: string[] = [],
-  query: Record<string, unknown> = {},
-  options: FetchAllLiveOptions = {}
+  query: Record<string, unknown> = {}
 ): Promise<HolodexVideo[]> {
   const targets = (orgs || []).filter(Boolean)
   if (targets.length === 0 || targets.includes("All Vtubers")) {
-    const videos = await fetchLive({ ...query, org: "All Vtubers" })
-    options.onPartial?.(videos)
-    return videos
+    return fetchLive({ ...query, org: "All Vtubers" })
   }
 
-  const partial: HolodexVideo[] = []
   const responses = await Promise.allSettled(
-    targets.map(async (org) => {
-      const videos = await fetchLive({ ...query, org })
-      partial.push(...videos)
-      options.onPartial?.(dedupeVideos(partial))
-      return videos
-    })
+    targets.map((org) => fetchLive({ ...query, org }))
   )
 
   const fulfilled = responses
