@@ -26,14 +26,29 @@ export async function fetchOrgs(): Promise<Org[]> {
   return normalizeOrgs(await readJson<unknown>(response))
 }
 
-export async function fetchLive(
+async function fetchLiveRaw(
   query: Record<string, unknown> = {}
 ): Promise<HolodexVideo[]> {
   const response = await fetch(`/api/v2/live?${qs(query)}`, {
     headers: { accept: "application/json" },
   })
-  const data = await readJson<HolodexVideo[]>(response)
-  return data.filter(isLiveInsideScheduleWindow)
+  return readJson<HolodexVideo[]>(response)
+}
+
+
+async function fetchAllPages(
+  query: Record<string, unknown>
+): Promise<HolodexVideo[]> {
+  const limit = Number(query.limit) || 100
+  const all: HolodexVideo[] = []
+  let offset = 0
+  while (true) {
+    const raw = await fetchLiveRaw({ ...query, offset })
+    all.push(...raw.filter(isLiveInsideScheduleWindow))
+    if (raw.length < limit) break
+    offset += limit
+  }
+  return all
 }
 
 export async function fetchAllLive(
@@ -42,11 +57,11 @@ export async function fetchAllLive(
 ): Promise<HolodexVideo[]> {
   const targets = (orgs || []).filter(Boolean)
   if (targets.length === 0 || targets.includes("All Vtubers")) {
-    return fetchLive({ ...query, org: "All Vtubers" })
+    return fetchAllPages({ ...query, org: "All Vtubers" })
   }
 
   const responses = await Promise.allSettled(
-    targets.map((org) => fetchLive({ ...query, org }))
+    targets.map((org) => fetchAllPages({ ...query, org }))
   )
 
   const fulfilled = responses

@@ -59,7 +59,7 @@ const PAGE_LENGTH = 25
 const PREFETCH_PAGE_COUNT = 2
 const PAGE_THUMBNAIL_PRELOAD_LIMIT = PAGE_LENGTH
 const EAGER_THUMBNAIL_COUNT = 10
-const DEFAULT_HOME_ORGS = ["Hololive"]
+const DEFAULT_HOME_ORGS = ["VSpo", "Neo-Porte", "Riot Music", "RK Music"]
 const INITIAL_LIVE_REFRESH = { force: true, minutes: 2 } as const
 const HOME_LIVE_QUERY = {
   type: "placeholder,stream",
@@ -67,7 +67,7 @@ const HOME_LIVE_QUERY = {
   limit: API_MAX_LIMIT,
 }
 
-type TabValue = "live" | "archive" | "clips"
+export type TabValue = "live" | "archive" | "clips"
 type PagedTabValue = Exclude<TabValue, "live">
 type TabState = {
   pages: Record<number, HolodexVideo[]>
@@ -519,13 +519,13 @@ function PagedTabContent({
   )
 }
 
-export function HomeClient() {
+export function HomeClient({ initialTab = "live" }: { initialTab?: TabValue }) {
   const [orgs, setOrgs] = useState<Org[]>([])
   const [orgsLoading, setOrgsLoading] = useState(false)
   const [orgsError, setOrgsError] = useState<string | null>(null)
   const [selectedHomeOrgs, setSelectedHomeOrgsState] =
     useState<string[]>(() => [...DEFAULT_HOME_ORGS])
-  const [tab, setTab] = useState<TabValue>("live")
+  const [tab, setTab] = useState<TabValue>(initialTab)
   const [homeLive, setHomeLive] = useState<HolodexVideo[]>([])
   const [homeLoading, setHomeLoading] = useState(true)
   const [homeError, setHomeError] = useState<string | null>(null)
@@ -844,17 +844,14 @@ export function HomeClient() {
     []
   )
 
-  const refreshCurrentTab = useCallback(() => {
+  const refreshAllTabs = useCallback(() => {
     if (isDocumentHidden()) return
-
-    if (tab === "live") {
-      void fetchHomeLive({ force: true })
-      return
+    void fetchHomeLive({ force: true })
+    for (const tabValue of ["archive", "clips"] as PagedTabValue[]) {
+      const currentState = tabStatesRef.current[tabValue]
+      void loadTabPage(tabValue, currentState.currentPage, true)
     }
-
-    const currentState = tabStatesRef.current[tab]
-    void loadTabPage(tab, currentState.currentPage, true)
-  }, [fetchHomeLive, loadTabPage, tab])
+  }, [fetchHomeLive, loadTabPage])
 
   function setSelectedHomeOrgs(nextRaw: string[]) {
     const next = normalizeSelectedHomeOrgs(nextRaw)
@@ -878,23 +875,26 @@ export function HomeClient() {
     pagedDataCache.clear()
     setTabStates(initialTabStates())
     void fetchHomeLive(INITIAL_LIVE_REFRESH)
-    if (tab !== "live") void loadTabPage(tab, 1, true)
-  }, [fetchHomeLive, loadTabPage, selectedKey, storageHydrated, tab])
-
-  useEffect(() => {
-    if (!storageHydrated) return
-    if (tab === "live") return
-    const currentState = tabStatesRef.current[tab]
-    if (!currentState.pages[currentState.currentPage]) {
-      void loadTabPage(tab, currentState.currentPage)
+    for (const tabValue of ["archive", "clips"] as PagedTabValue[]) {
+      void loadTabPage(tabValue, 1, true)
     }
-  }, [loadTabPage, storageHydrated, tab])
+  }, [fetchHomeLive, loadTabPage, selectedKey, storageHydrated])
 
   useEffect(() => {
     if (!storageHydrated) return
-    const interval = window.setInterval(refreshCurrentTab, AUTO_REFRESH_MS)
+    for (const tabValue of ["archive", "clips"] as PagedTabValue[]) {
+      const currentState = tabStatesRef.current[tabValue]
+      if (!currentState.pages[currentState.currentPage]) {
+        void loadTabPage(tabValue, currentState.currentPage)
+      }
+    }
+  }, [loadTabPage, storageHydrated])
+
+  useEffect(() => {
+    if (!storageHydrated) return
+    const interval = window.setInterval(refreshAllTabs, AUTO_REFRESH_MS)
     return () => window.clearInterval(interval)
-  }, [refreshCurrentTab, storageHydrated])
+  }, [refreshAllTabs, storageHydrated])
 
   const live = useMemo(
     () =>
@@ -926,12 +926,10 @@ export function HomeClient() {
   const changeTab = (value: string) => {
     const nextTab = value as TabValue
     if (isPagedTabValue(nextTab)) {
-      const nextState = tabStatesRef.current[nextTab]
-      if (!nextState.loading && !nextState.pages[nextState.currentPage]) {
-        void loadTabPage(nextTab, nextState.currentPage)
-      }
+      void loadTabPage(nextTab, 1)
     }
 
+    document.cookie = `holodex-nano-tab=${nextTab}; path=/; max-age=31536000; SameSite=Lax`
     setTab(nextTab)
     scrollToTop()
   }

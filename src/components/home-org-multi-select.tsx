@@ -229,7 +229,7 @@ export function HomeOrgMultiSelect({
         >
           <Building2 className="shrink-0" />
           <span ref={labelRef} className="min-w-0 flex-1 truncate text-left">
-            {triggerLabel}
+            {labelMetrics.width > 0 ? triggerLabel : null}
           </span>
           <ChevronDown className="ml-auto shrink-0" />
         </Button>

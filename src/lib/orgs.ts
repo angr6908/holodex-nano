@@ -8,11 +8,8 @@ export const allVtubersOrg: Org = {
 
 export const preferredOrgNames = [
   "Hololive",
-  "Nijisanji",
   "VSpo",
   "Neo-Porte",
-  "774inc",
-  "Varium",
   "RK Music",
   "Riot Music",
 ]
