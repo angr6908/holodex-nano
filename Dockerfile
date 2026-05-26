@@ -7,6 +7,7 @@ FROM oven/bun:alpine AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+ENV NEXT_OUTPUT_STANDALONE=true
 RUN bun run build
 RUN rm -rf .next/standalone/node_modules/@img .next/standalone/node_modules/sharp
 
