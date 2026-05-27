@@ -59,25 +59,6 @@ function formatRelativeOrDateTime(timestamp: number) {
   }).format(timestamp)
 }
 
-export function sortVideosForTab(items: HolodexVideo[], isArchive: boolean) {
-  if (!isArchive) {
-    return [...(items || [])].sort((a, b) => videoTemporalComparator(b, a))
-  }
-
-  return (items || [])
-    .map((item, index) => ({
-      item,
-      index,
-      endTime: videoEndTimestamp(item),
-      id: String(item?.id || ""),
-    }))
-    .sort(
-      (a, b) =>
-        b.endTime - a.endTime || b.id.localeCompare(a.id) || a.index - b.index
-    )
-    .map(({ item }) => item)
-}
-
 export function getLiveViewerCount(video?: HolodexVideo | null) {
   const value = Number(video?.live_viewers ?? video?.ccv ?? 0)
   return Number.isFinite(value) ? value : 0
