@@ -75,7 +75,7 @@ const HOME_LIVE_QUERY = {
   limit: API_MAX_LIMIT,
 }
 
-export type TabValue = "live" | "archive" | "clips"
+type TabValue = "live" | "archive" | "clips"
 type PagedTabValue = Exclude<TabValue, "live">
 type TabState = {
   currentPage: number
@@ -559,13 +559,13 @@ function PagedTabContent({
   )
 }
 
-export function HomeClient({ initialTab = "live" }: { initialTab?: TabValue }) {
+export function HomeClient() {
   const [orgs, setOrgs] = useState<Org[]>([])
   const [orgsLoading, setOrgsLoading] = useState(false)
   const [orgsError, setOrgsError] = useState<string | null>(null)
   const [selectedHomeOrgs, setSelectedHomeOrgsState] =
     useState<string[]>(() => [...DEFAULT_HOME_ORGS])
-  const [tab, setTab] = useState<TabValue>(initialTab)
+  const [tab, setTab] = useState<TabValue>("live")
   const [homeLive, setHomeLive] = useState<HolodexVideo[]>([])
   const [homeLoading, setHomeLoading] = useState(true)
   const [homeError, setHomeError] = useState<string | null>(null)
@@ -959,7 +959,6 @@ export function HomeClient({ initialTab = "live" }: { initialTab?: TabValue }) {
       }
     }
 
-    document.cookie = `holodex-nano-tab=${nextTab}; path=/; max-age=31536000; SameSite=Lax`
     setTab(nextTab)
     scrollToTop()
   }
