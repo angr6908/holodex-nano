@@ -254,7 +254,7 @@ function buildTabQuery(tabValue: PagedTabValue): Record<string, unknown> {
   return {
     status: isArchive ? "past,missing" : "past",
     type: isArchive ? "stream" : "clip",
-    lang: "en",
+    lang: isArchive ? "en" : undefined,
     paginated: false,
     max_upcoming_hours: 1,
   }
@@ -268,7 +268,7 @@ function cacheKeyForTab(tabValue: PagedTabValue, orgTargets: string[]) {
     "pages",
     `limit-${API_MAX_LIMIT}`,
     JSON.stringify(orgTargets),
-    "lang-en",
+    tabValue === "archive" ? "lang-en" : "lang-all",
   ].join("-")
 }
 
