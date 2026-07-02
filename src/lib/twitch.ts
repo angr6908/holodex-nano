@@ -6,6 +6,8 @@ const TWITCH_WEB_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
 const CACHE_TTL_MS = 60_000
 const STORAGE_KEY = "holodex-nano-twitch-viewer-counts"
 
+export const TWITCH_OFFLINE = -1
+
 const viewerCountCache = new Map<string, { ts: number; value: number }>()
 const inflightRequests = new Map<string, Promise<Record<string, number>>>()
 
@@ -95,7 +97,12 @@ async function requestViewerCounts(logins: string[]) {
       const data = Array.isArray(payload) ? payload[0]?.data : payload?.data
       return logins.reduce(
         (acc, login, index) => {
-          const value = Number(data?.[`u${index}`]?.stream?.viewersCount ?? 0)
+          const stream = data?.[`u${index}`]?.stream
+          if (!stream) {
+            acc[login] = TWITCH_OFFLINE
+            return acc
+          }
+          const value = Number(stream.viewersCount ?? 0)
           acc[login] = Number.isFinite(value) ? value : 0
           return acc
         },
@@ -160,11 +167,13 @@ export function mergeTwitchViewerCountsIntoVideos(
   videos: HolodexVideo[],
   counts: Record<string, number>
 ) {
-  return (videos || []).map((video) => {
+  return (videos || []).flatMap((video) => {
     const twitchLogin = getTwitchLogin(video)
-    if (!twitchLogin || counts[twitchLogin] === undefined) return video
-    if (video.live_viewers === counts[twitchLogin]) return video
-    return { ...video, live_viewers: counts[twitchLogin] }
+    if (!twitchLogin) return [video]
+    const count = counts[twitchLogin]
+    if (count === TWITCH_OFFLINE) return video.status === "live" ? [] : [video]
+    if (count === undefined || video.live_viewers === count) return [video]
+    return [{ ...video, live_viewers: count }]
   })
 }
 

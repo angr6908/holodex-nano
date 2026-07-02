@@ -8,14 +8,31 @@ export const allVtubersOrg: Org = {
 
 export const preferredOrgNames = [
   "Hololive",
+  "Nijisanji",
   "VSpo",
   "Neo-Porte",
+  "774inc",
+  "Aogiri Highschool",
+  "Varium",
+  "MillionProduction",
+  "Mixstgirls",
+  "Phase Connect",
+  "KAMITSUBAKI",
   "RK Music",
   "Riot Music",
+  "REJECT",
+  "Independents",
 ]
 
+const orgDisplayNameOverrides: Record<string, string> = {
+  VSpo: "VSPO",
+  Nijisanji: "NIJISANJI",
+  "Aogiri Highschool": "AogiriHS",
+  MillionProduction: "Million Pro",
+}
+
 export function formatOrgDisplayName(name: string): string {
-  return name === "VSpo" ? "VSPO" : name || ""
+  return orgDisplayNameOverrides[name] ?? name ?? ""
 }
 
 export function normalizeSelectedHomeOrgs(orgs: string[]): string[] {
