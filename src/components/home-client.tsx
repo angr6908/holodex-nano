@@ -67,7 +67,7 @@ const MAX_STREAM_DURATION_MS = 12 * 60 * 60 * 1000
 // Safety valve so a pathologically dense selection can't fetch forever to fill
 // one page; we show whatever is safely committed instead.
 const MAX_FETCH_ROUNDS_PER_LOAD = 12
-const DEFAULT_HOME_ORGS = ["VSpo", "Neo-Porte", "Riot Music", "RK Music", "REJECT"]
+const DEFAULT_HOME_ORGS = ["VSpo", "Neo-Porte", "Riot Music", "RK Music"]
 const INITIAL_LIVE_REFRESH = { force: true, minutes: 2 } as const
 const HOME_LIVE_QUERY = {
   type: "placeholder,stream",
