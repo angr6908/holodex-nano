@@ -1,35 +1,56 @@
 "use client"
 
 import Link from "next/link"
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { LoaderCircle } from "lucide-react"
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react"
 
-import { fetchAllLive, fetchOrgs, fetchVideos } from "@/lib/holodex"
+import {
+  HOLODEX_PAGE_LIMIT,
+  fetchAllLive,
+  fetchOrgs,
+  fetchVideos,
+  isFetchActive,
+  prefetchApi,
+  subscribeFetchActivity,
+} from "@/lib/holodex"
 import {
   readStoredHomeLive,
   writeStoredHomeLive,
 } from "@/lib/home-live-cache"
 import {
+  allVtubersOrg,
   makeLiveCacheKey,
   normalizeSelectedHomeOrgs,
+  resolveOrgTargets,
 } from "@/lib/orgs"
+import { readJsonStorage, writeJsonStorage } from "@/lib/storage"
+import { cn } from "@/lib/utils"
 import { preloadVideoThumbnails } from "@/lib/thumbnail-preload"
 import type { HolodexVideo, Org } from "@/lib/types"
 import {
   dedupeVideos,
   extractItems,
-  getTwitchLogin,
   getLiveViewerCount,
+  parseTimeMs,
+  upcomingStartTimestamp,
   videoEndTimestamp,
   videoTemporalComparator,
 } from "@/lib/video-utils"
 import {
+  applyCachedTwitchViewerCounts,
   enrichLiveVideosWithTwitchViewerCounts,
-  mergeTwitchViewerCountsIntoVideos,
-  readCachedTwitchViewerCounts,
 } from "@/lib/twitch"
 import { HolodexLogo } from "@/components/holodex-logo"
 import { HomeOrgMultiSelect } from "@/components/home-org-multi-select"
-import { VideoCard } from "@/components/video-card"
+import { VideoCard, videoRenderEqual } from "@/components/video-card"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import {
   Empty,
@@ -54,10 +75,8 @@ const HOME_SELECTED_ORGS_KEY = "holodex-nano-selected-orgs"
 const ORGS_STORAGE_KEY = "holodex-nano-orgs"
 const TWITCH_ENRICH_TIMEOUT_MS = 2500
 const AUTO_REFRESH_MS = 60_000
-const API_MAX_LIMIT = 100
 const PAGE_LENGTH = 25
 const PREFETCH_PAGE_COUNT = 2
-const PAGE_THUMBNAIL_PRELOAD_LIMIT = PAGE_LENGTH
 const EAGER_THUMBNAIL_COUNT = 10
 // Upper bound on how long after its start an archived stream can end. The merge
 // uses it to translate the API's available_at (start) pagination frontier into
@@ -68,18 +87,18 @@ const MAX_STREAM_DURATION_MS = 12 * 60 * 60 * 1000
 // one page; we show whatever is safely committed instead.
 const MAX_FETCH_ROUNDS_PER_LOAD = 12
 const DEFAULT_HOME_ORGS = ["VSpo", "Neo-Porte", "Riot Music", "RK Music"]
-const INITIAL_LIVE_REFRESH = { force: true, minutes: 2 } as const
 const HOME_LIVE_QUERY = {
   type: "placeholder,stream",
   include: "mentions",
-  limit: API_MAX_LIMIT,
+  limit: HOLODEX_PAGE_LIMIT,
 }
+const VIDEO_GRID_CLASS = "grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5"
 
 type TabValue = "live" | "archive" | "clips"
 type PagedTabValue = Exclude<TabValue, "live">
 type TabState = {
   currentPage: number
-  items: HolodexVideo[]
+  pages: Map<number, HolodexVideo[]>
   knownPages: number
   canLoadMore: boolean
   loading: boolean
@@ -91,6 +110,14 @@ type PagedSource = {
   slice: (offset: number, limit: number) => HolodexVideo[]
   committedCount: () => number
   isExhausted: () => boolean
+  snapshot: () => Map<string, PagedOrgSnapshot>
+}
+
+type PagedOrgSnapshot = {
+  items: HolodexVideo[]
+  offset: number
+  exhausted: boolean
+  frontier: number
 }
 
 type HomeStateSnapshot = {
@@ -123,7 +150,7 @@ const pagedTabCopy: Record<
 function emptyTabState(): TabState {
   return {
     currentPage: 1,
-    items: [],
+    pages: new Map(),
     knownPages: 1,
     canLoadMore: false,
     loading: true,
@@ -149,27 +176,43 @@ function errorMessage(error: unknown) {
 }
 
 function readStoredSelectedOrgs() {
-  if (typeof window === "undefined") return [...DEFAULT_HOME_ORGS]
-  try {
-    const parsed = JSON.parse(
-      window.localStorage.getItem(HOME_SELECTED_ORGS_KEY) || "null"
-    )
-    return Array.isArray(parsed)
-      ? normalizeSelectedHomeOrgs(parsed)
-      : [...DEFAULT_HOME_ORGS]
-  } catch {
-    return [...DEFAULT_HOME_ORGS]
-  }
+  const parsed = readJsonStorage(HOME_SELECTED_ORGS_KEY)
+  return Array.isArray(parsed)
+    ? normalizeSelectedHomeOrgs(parsed)
+    : [...DEFAULT_HOME_ORGS]
 }
 
 function readStoredOrgs() {
-  if (typeof window === "undefined") return []
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(ORGS_STORAGE_KEY) || "{}")
-    return Array.isArray(parsed.orgs) ? (parsed.orgs as Org[]) : []
-  } catch {
-    return []
+  const parsed = readJsonStorage(ORGS_STORAGE_KEY) as { orgs?: unknown } | null
+  return Array.isArray(parsed?.orgs) ? (parsed.orgs as Org[]) : []
+}
+
+function videoListRenderEqual(a: HolodexVideo[], b: HolodexVideo[]) {
+  return (
+    a.length === b.length &&
+    a.every((video, index) => videoRenderEqual(video, b[index]))
+  )
+}
+
+function tabPagesEqual(
+  a: Map<number, HolodexVideo[]>,
+  b: Map<number, HolodexVideo[]>
+) {
+  if (a.size !== b.size) return false
+  for (const [page, items] of a) {
+    if (b.get(page) !== items) return false
   }
+  return true
+}
+
+function filterVideosByOrgs(videos: HolodexVideo[], orgTargets: string[]) {
+  const targets = new Set(orgTargets)
+  return videos.filter((video) => {
+    if (video.channel?.org && targets.has(video.channel.org)) return true
+    return (video.mentions || []).some(
+      (mention) => mention.org && targets.has(mention.org)
+    )
+  })
 }
 
 function liveFingerprint(arr: HolodexVideo[]) {
@@ -181,38 +224,27 @@ function liveFingerprint(arr: HolodexVideo[]) {
     .join(",")
 }
 
-function sortHomeLiveVideos(videos: HolodexVideo[]) {
-  const merged = dedupeVideos(videos || [])
+function prepareHomeLiveVideos(videos: HolodexVideo[]) {
+  const merged = applyCachedTwitchViewerCounts(dedupeVideos(videos || []))
   merged.sort(videoTemporalComparator)
   return merged
 }
 
-function applyCachedTwitchViewerCounts(videos: HolodexVideo[]) {
-  const deduped = dedupeVideos(videos || [])
-  const twitchLogins = [
-    ...new Set(
-      deduped
-        .filter((video) => video.status === "live")
-        .map((video) => getTwitchLogin(video))
-        .filter((login): login is string => Boolean(login))
-    ),
-  ]
-  const cachedCounts = readCachedTwitchViewerCounts(twitchLogins)
-  return mergeTwitchViewerCountsIntoVideos(deduped, cachedCounts)
-}
-
-function prepareHomeLiveVideos(videos: HolodexVideo[]) {
-  return sortHomeLiveVideos(applyCachedTwitchViewerCounts(videos))
-}
-
-async function enrichLiveVideosBestEffort(videos: HolodexVideo[]) {
+async function enrichLiveVideosBestEffort(
+  videos: HolodexVideo[],
+  force = false
+) {
   let timeoutId: ReturnType<typeof setTimeout> | undefined
+  const request = enrichLiveVideosWithTwitchViewerCounts(videos, { force })
   try {
     return await Promise.race([
-      enrichLiveVideosWithTwitchViewerCounts(videos),
-      new Promise<HolodexVideo[]>((resolve) => {
+      request.then((enriched) => ({ videos: enriched, lateResult: null })),
+      new Promise<{
+        videos: HolodexVideo[]
+        lateResult: Promise<HolodexVideo[]>
+      }>((resolve) => {
         timeoutId = setTimeout(
-          () => resolve(videos),
+          () => resolve({ videos, lateResult: request }),
           TWITCH_ENRICH_TIMEOUT_MS
         )
       }),
@@ -220,11 +252,6 @@ async function enrichLiveVideosBestEffort(videos: HolodexVideo[]) {
   } finally {
     if (timeoutId) clearTimeout(timeoutId)
   }
-}
-
-function availableAtMs(video: HolodexVideo) {
-  const time = new Date(video.available_at || "").getTime()
-  return Number.isFinite(time) ? time : 0
 }
 
 // Newest-ending first. Archived streams are ordered by when they ended
@@ -236,8 +263,7 @@ function pagedComparator(a: HolodexVideo, b: HolodexVideo) {
 }
 
 function upcomingStartMs(video: HolodexVideo) {
-  const time = new Date(video.start_scheduled || video.available_at || "").getTime()
-  return Number.isFinite(time) ? time : Number.POSITIVE_INFINITY
+  return upcomingStartTimestamp(video) || Number.POSITIVE_INFINITY
 }
 
 function upcomingComparator(a: HolodexVideo, b: HolodexVideo) {
@@ -247,6 +273,17 @@ function upcomingComparator(a: HolodexVideo, b: HolodexVideo) {
   const bPlaceholder = b.type === "placeholder" ? 1 : 0
   if (aPlaceholder !== bPlaceholder) return aPlaceholder - bPlaceholder
   return String(a.id).localeCompare(String(b.id))
+}
+
+function groupHomeVideos(videos: HolodexVideo[]) {
+  return {
+    liveStreams: videos
+      .filter((video) => video.status === "live")
+      .sort((a, b) => getLiveViewerCount(b) - getLiveViewerCount(a)),
+    upcomingStreams: videos
+      .filter((video) => video.status === "upcoming")
+      .sort(upcomingComparator),
+  }
 }
 
 function buildTabQuery(tabValue: PagedTabValue): Record<string, unknown> {
@@ -260,18 +297,6 @@ function buildTabQuery(tabValue: PagedTabValue): Record<string, unknown> {
   }
 }
 
-function cacheKeyForTab(tabValue: PagedTabValue, orgTargets: string[]) {
-  return [
-    "vlx",
-    "home",
-    tabValue,
-    "pages",
-    `limit-${API_MAX_LIMIT}`,
-    JSON.stringify(orgTargets),
-    tabValue === "archive" ? "lang-en" : "lang-all",
-  ].join("-")
-}
-
 // Merges several independently-paginated per-org feeds into one stable,
 // newest-ending-first list. The API paginates by available_at (start time), so
 // we track the frontier there but commit by end time: an item is only shown
@@ -282,16 +307,24 @@ function cacheKeyForTab(tabValue: PagedTabValue, orgTargets: string[]) {
 function createPagedSource(
   query: Record<string, unknown>,
   orgTargets: string[],
-  maxKeyAheadMs: number
+  maxKeyAheadMs: number,
+  seed?: Map<string, PagedOrgSnapshot>
 ): PagedSource {
-  const baseQuery = { ...query, paginated: false }
-  const orgItems: HolodexVideo[][] = orgTargets.map(() => [])
-  const orgOffset: number[] = orgTargets.map(() => 0)
-  const orgExhausted: boolean[] = orgTargets.map(() => false)
+  const orgItems: HolodexVideo[][] = orgTargets.map(
+    (org) => seed?.get(org)?.items.slice() || []
+  )
+  const orgOffset: number[] = orgTargets.map(
+    (org) => seed?.get(org)?.offset || 0
+  )
+  const orgExhausted: boolean[] = orgTargets.map(
+    (org) => seed?.get(org)?.exhausted || false
+  )
   // available_at of the oldest item fetched so far per org. Orgs that have not
   // fetched yet hold +Infinity so the first round fetches all of them. This
   // decreases monotonically as we page, so the committed set only ever grows.
-  const orgFrontier: number[] = orgTargets.map(() => Number.POSITIVE_INFINITY)
+  const orgFrontier: number[] = orgTargets.map(
+    (org) => seed?.get(org)?.frontier ?? Number.POSITIVE_INFINITY
+  )
 
   let inflight: Promise<void> | null = null
   let version = 0
@@ -330,18 +363,18 @@ function createPagedSource(
   const fetchOrg = async (index: number) => {
     try {
       const payload = await fetchVideos({
-        ...baseQuery,
+        ...query,
         org: orgTargets[index],
-        limit: API_MAX_LIMIT,
+        limit: HOLODEX_PAGE_LIMIT,
         offset: orgOffset[index],
       })
       const items = extractItems(payload)
       if (items.length > 0) {
         orgItems[index] = orgItems[index].concat(items)
         orgOffset[index] += items.length
-        orgFrontier[index] = availableAtMs(items[items.length - 1])
+        orgFrontier[index] = parseTimeMs(items[items.length - 1].available_at)
       }
-      if (items.length < API_MAX_LIMIT) orgExhausted[index] = true
+      if (items.length < HOLODEX_PAGE_LIMIT) orgExhausted[index] = true
     } catch {
       orgExhausted[index] = true
     }
@@ -381,6 +414,18 @@ function createPagedSource(
     slice: (offset, limit) => committed().slice(offset, offset + limit),
     committedCount: () => committed().length,
     isExhausted: allExhausted,
+    snapshot: () =>
+      new Map(
+        orgTargets.map((org, index) => [
+          org,
+          {
+            items: orgItems[index],
+            offset: orgOffset[index],
+            exhausted: orgExhausted[index],
+            frontier: orgFrontier[index],
+          },
+        ])
+      ),
   }
 }
 
@@ -389,43 +434,79 @@ const pagedSources = new Map<string, PagedSource>()
 function getPagedSource(
   tabValue: PagedTabValue,
   selectedHomeOrgs: string[],
-  fresh: boolean
+  fresh: boolean,
+  reusableSelection: string[] = []
 ) {
-  const orgTargets = selectedHomeOrgs.length ? selectedHomeOrgs : ["All Vtubers"]
-  const cacheKey = cacheKeyForTab(tabValue, orgTargets)
+  const orgTargets = resolveOrgTargets(selectedHomeOrgs)
+  const query = buildTabQuery(tabValue)
+  const cacheKey = JSON.stringify([tabValue, orgTargets, query])
   if (fresh) pagedSources.delete(cacheKey)
   let source = pagedSources.get(cacheKey)
   if (!source) {
+    const reusableTargets = resolveOrgTargets(reusableSelection)
+    const reusableKey = JSON.stringify([tabValue, reusableTargets, query])
+    const reusableSource =
+      !orgTargets.includes(allVtubersOrg.name) &&
+      !reusableTargets.includes(allVtubersOrg.name)
+        ? pagedSources.get(reusableKey)
+        : undefined
     // Only archived streams carry a duration that pushes end time past start;
     // clips end at their timestamp, so no look-ahead is needed for them.
     const maxKeyAheadMs = tabValue === "archive" ? MAX_STREAM_DURATION_MS : 0
-    source = createPagedSource(buildTabQuery(tabValue), orgTargets, maxKeyAheadMs)
+    source = createPagedSource(
+      query,
+      orgTargets,
+      maxKeyAheadMs,
+      reusableSource?.snapshot()
+    )
     pagedSources.set(cacheKey, source)
   }
   return source
 }
 
-function clearPagedSources() {
-  pagedSources.clear()
-}
-
-function VideoGrid({ videos }: { videos: HolodexVideo[] }) {
+const VideoGrid = memo(function VideoGrid({
+  videos,
+  eagerThumbnails = false,
+}: {
+  videos: HolodexVideo[]
+  eagerThumbnails?: boolean
+}) {
   return (
-    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+    <div className={VIDEO_GRID_CLASS}>
       {videos.map((video, index) => (
         <VideoCard
           key={video.id}
           video={video}
-          eagerThumbnail={index < EAGER_THUMBNAIL_COUNT}
+          eagerThumbnail={eagerThumbnails || index < EAGER_THUMBNAIL_COUNT}
+          priorityThumbnail={index < EAGER_THUMBNAIL_COUNT}
         />
       ))}
     </div>
+  )
+})
+
+const serverFetchActivity = () => false
+
+function FetchActivityIndicator() {
+  const active = useSyncExternalStore(
+    subscribeFetchActivity,
+    isFetchActive,
+    serverFetchActivity
+  )
+  return (
+    <LoaderCircle
+      aria-hidden="true"
+      className={cn(
+        "size-4 animate-spin text-muted-foreground transition-opacity duration-300",
+        active ? "opacity-100" : "opacity-0"
+      )}
+    />
   )
 }
 
 function GridSkeleton() {
   return (
-    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+    <div className={VIDEO_GRID_CLASS}>
       {Array.from({ length: PAGE_LENGTH }).map((_, index) => (
         <div key={index} className="space-y-3">
           <Skeleton className="aspect-video w-full" />
@@ -467,6 +548,17 @@ function scrollToTop() {
   })
 }
 
+function resetToTop() {
+  const scrollingElement = document.scrollingElement
+  if (scrollingElement) {
+    scrollingElement.scrollTop = 0
+    scrollingElement.scrollLeft = 0
+    return
+  }
+  document.documentElement.scrollTop = 0
+  document.body.scrollTop = 0
+}
+
 function PagedTabContent({
   tabValue,
   state,
@@ -477,7 +569,9 @@ function PagedTabContent({
   onPageChange: (tabValue: PagedTabValue, page: number) => void
 }) {
   const copy = pagedTabCopy[tabValue]
-  const { currentPage, items, knownPages, canLoadMore, loading, error } = state
+  const { currentPage, pages, knownPages, canLoadMore, loading, error } = state
+  const items = pages.get(currentPage) || []
+
   const hasNextPage = canLoadMore || currentPage < knownPages
   const paginationItems = tabPaginationItems(currentPage, knownPages)
   const showPagination = items.length > 0 || currentPage > 1 || hasNextPage
@@ -491,7 +585,11 @@ function PagedTabContent({
         </Alert>
       ) : null}
 
-      {items.length ? <VideoGrid videos={items} /> : null}
+      {[...pages].map(([page, pageItems]) => (
+        <div key={page} hidden={page !== currentPage}>
+          <VideoGrid videos={pageItems} eagerThumbnails />
+        </div>
+      ))}
 
       {loading && !items.length ? <GridSkeleton /> : null}
 
@@ -560,7 +658,7 @@ function PagedTabContent({
 }
 
 export function HomeClient() {
-  const [orgs, setOrgs] = useState<Org[]>([])
+  const [orgs, setOrgsState] = useState<Org[]>([])
   const [orgsLoading, setOrgsLoading] = useState(false)
   const [orgsError, setOrgsError] = useState<string | null>(null)
   const [selectedHomeOrgs, setSelectedHomeOrgsState] =
@@ -569,10 +667,6 @@ export function HomeClient() {
   const [homeLive, setHomeLive] = useState<HolodexVideo[]>([])
   const [homeLoading, setHomeLoading] = useState(true)
   const [homeError, setHomeError] = useState<string | null>(null)
-  const [homeLastLiveUpdate, setHomeLastLiveUpdate] = useState(0)
-  const [homeLiveCacheKey, setHomeLiveCacheKey] = useState(
-    () => makeLiveCacheKey(DEFAULT_HOME_ORGS)
-  )
   const [storageHydrated, setStorageHydrated] = useState(false)
   const [tabStates, setTabStates] = useState(initialTabStates)
 
@@ -580,10 +674,10 @@ export function HomeClient() {
   const orgsInflight = useRef<Promise<Org[]> | null>(null)
   const selectedHomeOrgsRef = useRef(selectedHomeOrgs)
   const homeStateRef = useRef<HomeStateSnapshot>({
-    homeLive,
-    homeError,
-    homeLastLiveUpdate,
-    homeLiveCacheKey,
+    homeLive: [],
+    homeError: null,
+    homeLastLiveUpdate: 0,
+    homeLiveCacheKey: makeLiveCacheKey(DEFAULT_HOME_ORGS),
   })
   const homeInflight = useRef<Promise<void> | null>(null)
   const homeFetchSeq = useRef(0)
@@ -592,12 +686,16 @@ export function HomeClient() {
     archive: 0,
     clips: 0,
   })
-  const previousSelectedKey = useRef(JSON.stringify(selectedHomeOrgs))
+
+  const setOrgs = useCallback((next: Org[]) => {
+    orgsRef.current = next
+    setOrgsState(next)
+  }, [])
 
   const syncHomeState = useCallback(
     (
       next: HomeStateSnapshot,
-      opts: { loading: boolean; preserveLiveIdentity?: boolean }
+      opts: { loading?: boolean; preserveLiveIdentity?: boolean }
     ) => {
       setHomeLive((previous) =>
         opts.preserveLiveIdentity &&
@@ -606,9 +704,7 @@ export function HomeClient() {
           : next.homeLive
       )
       setHomeError(next.homeError)
-      setHomeLastLiveUpdate(next.homeLastLiveUpdate)
-      setHomeLiveCacheKey(next.homeLiveCacheKey)
-      setHomeLoading(opts.loading)
+      if (opts.loading !== undefined) setHomeLoading(opts.loading)
       homeStateRef.current = next
     },
     []
@@ -623,11 +719,9 @@ export function HomeClient() {
       ? prepareHomeLiveVideos(cachedHomeLive.videos)
       : null
 
-    orgsRef.current = storedOrgs
-    selectedHomeOrgsRef.current = storedSelected
     setOrgs(storedOrgs)
+    selectedHomeOrgsRef.current = storedSelected
     setSelectedHomeOrgsState(storedSelected)
-    previousSelectedKey.current = JSON.stringify(storedSelected)
 
     syncHomeState(
       {
@@ -639,24 +733,7 @@ export function HomeClient() {
       { loading: !cachedVideos }
     )
     setStorageHydrated(true)
-  }, [syncHomeState])
-
-  useEffect(() => {
-    orgsRef.current = orgs
-  }, [orgs])
-
-  useEffect(() => {
-    selectedHomeOrgsRef.current = selectedHomeOrgs
-  }, [selectedHomeOrgs])
-
-  useEffect(() => {
-    homeStateRef.current = {
-      homeLive,
-      homeError,
-      homeLastLiveUpdate,
-      homeLiveCacheKey,
-    }
-  }, [homeError, homeLastLiveUpdate, homeLive, homeLiveCacheKey])
+  }, [setOrgs, syncHomeState])
 
   useEffect(() => {
     tabStatesRef.current = tabStates
@@ -670,10 +747,7 @@ export function HomeClient() {
       setOrgsError(null)
       orgsInflight.current = fetchOrgs()
         .then((fresh) => {
-          window.localStorage.setItem(
-            ORGS_STORAGE_KEY,
-            JSON.stringify({ orgs: fresh })
-          )
+          writeJsonStorage(ORGS_STORAGE_KEY, { orgs: fresh })
           return fresh
         })
         .finally(() => {
@@ -682,48 +756,66 @@ export function HomeClient() {
         })
       return orgsInflight.current
     }
+    const applyFresh = (fresh: Org[]) => {
+      if (
+        JSON.stringify(fresh.map((org) => org.name)) !==
+        JSON.stringify((orgsRef.current || []).map((org) => org.name))
+      ) {
+        setOrgs(fresh)
+      }
+    }
 
     if (current.length > 0) {
       loadFresh()
-        .then((fresh) => {
-          if (
-            JSON.stringify(fresh.map((org) => org.name)) !==
-            JSON.stringify((orgsRef.current || []).map((org) => org.name))
-          ) {
-            setOrgs(fresh)
-            orgsRef.current = fresh
-          }
-        })
-        .catch((error) => {
-          setOrgsError(errorMessage(error))
-        })
+        .then(applyFresh)
+        .catch((error) => setOrgsError(errorMessage(error)))
       return current
     }
 
     try {
       const fresh = await loadFresh()
-      setOrgs(fresh)
-      orgsRef.current = fresh
+      applyFresh(fresh)
       return fresh
     } catch (error) {
       setOrgsError(errorMessage(error))
       return []
     }
-  }, [])
+  }, [setOrgs])
 
   const fetchHomeLive = useCallback(
-    (opts: { force?: boolean; minutes?: number } = {}) => {
+    (
+      opts: { force?: boolean; minutes?: number; background?: boolean } = {}
+    ) => {
       if (isDocumentHidden() && !opts.force) {
         return null
       }
 
-      const { force = false, minutes = 5 } = opts
-      const orgTargets = selectedHomeOrgsRef.current.length
-        ? selectedHomeOrgsRef.current
-        : ["All Vtubers"]
+      const { force = false, minutes = 5, background = false } = opts
+      const orgTargets = resolveOrgTargets(selectedHomeOrgsRef.current)
       const nextCacheKey = makeLiveCacheKey(orgTargets)
       const current = homeStateRef.current
       const cacheChanged = current.homeLiveCacheKey !== nextCacheKey
+      let previousTargets: string[] = []
+      try {
+        const parsed = JSON.parse(current.homeLiveCacheKey)
+        if (Array.isArray(parsed)) previousTargets = parsed.map(String)
+      } catch {}
+      const additiveSelection =
+        cacheChanged &&
+        !homeInflight.current &&
+        previousTargets.length > 0 &&
+        !previousTargets.includes(allVtubersOrg.name) &&
+        !orgTargets.includes(allVtubersOrg.name) &&
+        previousTargets.every((org) => orgTargets.includes(org))
+      const removalSelection =
+        cacheChanged &&
+        previousTargets.length > 0 &&
+        !orgTargets.includes(allVtubersOrg.name) &&
+        (previousTargets.includes(allVtubersOrg.name) ||
+          orgTargets.every((org) => previousTargets.includes(org)))
+      const requestTargets = additiveSelection
+        ? orgTargets.filter((org) => !previousTargets.includes(org))
+        : orgTargets
       if (homeInflight.current && !cacheChanged) return homeInflight.current
 
       const effectiveLastUpdate = cacheChanged ? 0 : current.homeLastLiveUpdate
@@ -738,7 +830,9 @@ export function HomeClient() {
 
       let visibleLive = current.homeLive
       let visibleLastUpdate = current.homeLastLiveUpdate
-      if (cacheChanged && visibleLive.length === 0) {
+      if (removalSelection && visibleLive.length > 0) {
+        visibleLive = filterVideosByOrgs(visibleLive, orgTargets)
+      } else if (cacheChanged && visibleLive.length === 0) {
         const cachedHomeLive = readStoredHomeLive(nextCacheKey)
         if (cachedHomeLive) {
           visibleLive = prepareHomeLiveVideos(cachedHomeLive.videos)
@@ -749,17 +843,21 @@ export function HomeClient() {
       syncHomeState(
         {
           homeLive: visibleLive,
-          homeError: null,
+          homeError: background ? current.homeError : null,
           homeLastLiveUpdate: visibleLastUpdate,
           homeLiveCacheKey: nextCacheKey,
         },
-        { loading: visibleLive.length === 0, preserveLiveIdentity: true }
+        {
+          loading: background ? undefined : visibleLive.length === 0,
+          preserveLiveIdentity: true,
+        }
       )
 
       const seq = ++homeFetchSeq.current
-      const commitLive = (videos: HolodexVideo[]) => {
+      const commitLive = async (videos: HolodexVideo[]) => {
         if (seq !== homeFetchSeq.current) return
         const merged = prepareHomeLiveVideos(videos)
+        void preloadVideoThumbnails(merged)
         const updatedAt = writeStoredHomeLive(nextCacheKey, merged)
         syncHomeState(
           {
@@ -772,15 +870,28 @@ export function HomeClient() {
         )
       }
 
-      const request = fetchAllLive(orgTargets, HOME_LIVE_QUERY)
+      const request = fetchAllLive(requestTargets, HOME_LIVE_QUERY)
         .then(async (response) => {
           if (seq !== homeFetchSeq.current) return
-          const enriched = await enrichLiveVideosBestEffort(response)
+          const baseVideos = additiveSelection
+            ? dedupeVideos([...current.homeLive, ...response])
+            : response
+          if (!homeStateRef.current.homeLive.length) {
+            await commitLive(baseVideos)
+            if (seq !== homeFetchSeq.current) return
+          }
+          const enrichment = await enrichLiveVideosBestEffort(baseVideos, force)
           if (seq !== homeFetchSeq.current) return
-          commitLive(enriched)
+          await commitLive(enrichment.videos)
+          if (enrichment.lateResult) {
+            void enrichment.lateResult
+              .then((lateVideos) => commitLive(lateVideos))
+              .catch(() => {})
+          }
         })
         .catch((error) => {
           if (seq !== homeFetchSeq.current) return
+          if (background) return
           syncHomeState(
             {
               ...homeStateRef.current,
@@ -803,44 +914,86 @@ export function HomeClient() {
   // load, org changes and auto-refresh funnel through here so the rendered
   // page is always derived from one source of truth and never desyncs.
   const loadTabPage = useCallback(
-    async (tabValue: PagedTabValue, page = 1, force = false) => {
+    async (
+      tabValue: PagedTabValue,
+      page = 1,
+      force = false,
+      background = false,
+      reusableSelection: string[] = []
+    ) => {
       const requestedPage = Math.max(1, page)
       const needed = requestedPage * PAGE_LENGTH
       const seq = ++tabFetchSeq.current[tabValue]
-      const source = getPagedSource(tabValue, selectedHomeOrgsRef.current, force)
+      const source = getPagedSource(
+        tabValue,
+        selectedHomeOrgsRef.current,
+        force,
+        reusableSelection
+      )
 
-      const ready = !force && source.committedCount() >= needed
-      if (!ready) {
-        setTabStates((current) => ({
-          ...current,
-          [tabValue]: { ...current[tabValue], loading: true, error: null },
-        }))
+      const buildPages = (
+        previous: Map<number, HolodexVideo[]>,
+        throughPage: number
+      ) => {
+        const maxPage = Math.ceil(source.committedCount() / PAGE_LENGTH)
+        const target = Math.min(
+          Math.max(throughPage + PREFETCH_PAGE_COUNT, ...previous.keys()),
+          maxPage
+        )
+        const pages = new Map<number, HolodexVideo[]>()
+        for (let pageNumber = 1; pageNumber <= target; pageNumber++) {
+          const items = source.slice(
+            (pageNumber - 1) * PAGE_LENGTH,
+            PAGE_LENGTH
+          )
+          if (!items.length) break
+          const prior = previous.get(pageNumber)
+          pages.set(
+            pageNumber,
+            prior && videoListRenderEqual(prior, items) ? prior : items
+          )
+        }
+        return pages
       }
 
-      try {
-        await source.ensure(needed)
-        if (seq !== tabFetchSeq.current[tabValue]) return
-
+      const commitPage = () => {
         const exhausted = source.isExhausted()
         const committedCount = source.committedCount()
         const maxPage = Math.max(1, Math.ceil(committedCount / PAGE_LENGTH))
         const finalPage = exhausted
           ? Math.min(requestedPage, maxPage)
           : requestedPage
-        const items = source.slice((finalPage - 1) * PAGE_LENGTH, PAGE_LENGTH)
-        preloadVideoThumbnails(items, PAGE_THUMBNAIL_PRELOAD_LIMIT)
+        void preloadVideoThumbnails(
+          source.slice((finalPage - 1) * PAGE_LENGTH, PAGE_LENGTH)
+        )
 
-        setTabStates((current) => ({
-          ...current,
-          [tabValue]: {
-            currentPage: finalPage,
-            items,
-            knownPages: Math.max(finalPage, maxPage),
-            canLoadMore: !exhausted,
-            loading: false,
-            error: null,
-          },
-        }))
+        setTabStates((current) => {
+          const tabState = current[tabValue]
+          const built = buildPages(tabState.pages, finalPage)
+          const samePages = tabPagesEqual(tabState.pages, built)
+          const knownPages = Math.max(finalPage, maxPage)
+          if (
+            samePages &&
+            tabState.currentPage === finalPage &&
+            tabState.knownPages === knownPages &&
+            tabState.canLoadMore === !exhausted &&
+            !tabState.loading &&
+            !tabState.error
+          ) {
+            return current
+          }
+          return {
+            ...current,
+            [tabValue]: {
+              currentPage: finalPage,
+              pages: samePages ? tabState.pages : built,
+              knownPages,
+              canLoadMore: !exhausted,
+              loading: false,
+              error: null,
+            },
+          }
+        })
 
         // Warm the next pages so navigation is instant, and reveal any newly
         // known page numbers without disturbing the visible page.
@@ -849,14 +1002,23 @@ export function HomeClient() {
             .ensure((finalPage + PREFETCH_PAGE_COUNT) * PAGE_LENGTH)
             .then(() => {
               if (seq !== tabFetchSeq.current[tabValue]) return
+              void preloadVideoThumbnails(
+                source.slice(
+                  finalPage * PAGE_LENGTH,
+                  PREFETCH_PAGE_COUNT * PAGE_LENGTH
+                )
+              )
               setTabStates((current) => {
                 const tabState = current[tabValue]
+                const built = buildPages(tabState.pages, tabState.currentPage)
+                const samePages = tabPagesEqual(tabState.pages, built)
                 const nextKnown = Math.max(
                   tabState.currentPage,
                   Math.ceil(source.committedCount() / PAGE_LENGTH)
                 )
                 const nextCanLoadMore = !source.isExhausted()
                 if (
+                  samePages &&
                   nextKnown === tabState.knownPages &&
                   nextCanLoadMore === tabState.canLoadMore
                 ) {
@@ -866,6 +1028,7 @@ export function HomeClient() {
                   ...current,
                   [tabValue]: {
                     ...tabState,
+                    pages: samePages ? tabState.pages : built,
                     knownPages: nextKnown,
                     canLoadMore: nextCanLoadMore,
                   },
@@ -874,8 +1037,27 @@ export function HomeClient() {
             })
             .catch(() => {})
         }
+      }
+
+      if (source.committedCount() >= needed) {
+        commitPage()
+        return
+      }
+
+      if (!background) {
+        setTabStates((current) => ({
+          ...current,
+          [tabValue]: { ...current[tabValue], loading: true, error: null },
+        }))
+      }
+
+      try {
+        await source.ensure(needed)
+        if (seq !== tabFetchSeq.current[tabValue]) return
+        commitPage()
       } catch (error) {
         if (seq !== tabFetchSeq.current[tabValue]) return
+        if (background) return
         setTabStates((current) => ({
           ...current,
           [tabValue]: {
@@ -889,42 +1071,73 @@ export function HomeClient() {
     []
   )
 
+  // Refresh the live feed and both paged tabs every tick, including tabs that
+  // are currently hidden. Keep existing UI mounted while fresh data loads.
   const refreshAll = useCallback(() => {
     if (isDocumentHidden()) return
-    void fetchHomeLive({ force: true })
+    void fetchHomeLive({ force: true, background: true })
     for (const tabValue of ["archive", "clips"] as PagedTabValue[]) {
-      void loadTabPage(tabValue, tabStatesRef.current[tabValue].currentPage, true)
+      void loadTabPage(
+        tabValue,
+        tabStatesRef.current[tabValue].currentPage,
+        true,
+        true
+      )
     }
   }, [fetchHomeLive, loadTabPage])
 
+  const prefetchDraftOrgs = useCallback((draft: string[]) => {
+    const current = new Set(resolveOrgTargets(selectedHomeOrgsRef.current))
+    for (const org of resolveOrgTargets(normalizeSelectedHomeOrgs(draft))) {
+      if (current.has(org)) continue
+      for (const tabValue of ["archive", "clips"] as PagedTabValue[]) {
+        prefetchApi("videos", {
+          ...buildTabQuery(tabValue),
+          org,
+          limit: HOLODEX_PAGE_LIMIT,
+          offset: 0,
+        })
+      }
+      prefetchApi("live", { ...HOME_LIVE_QUERY, org, offset: 0 })
+    }
+  }, [])
+
   function setSelectedHomeOrgs(nextRaw: string[]) {
     const next = normalizeSelectedHomeOrgs(nextRaw)
-    setSelectedHomeOrgsState(next)
+    const previousSelection = selectedHomeOrgsRef.current
+    const selectionKey = JSON.stringify(next)
+    if (selectionKey === JSON.stringify(previousSelection)) return
+    resetToTop()
     selectedHomeOrgsRef.current = next
-    window.localStorage.setItem(HOME_SELECTED_ORGS_KEY, JSON.stringify(next))
+    setSelectedHomeOrgsState(next)
+    writeJsonStorage(HOME_SELECTED_ORGS_KEY, next)
+
+    const stale = () =>
+      JSON.stringify(selectedHomeOrgsRef.current) !== selectionKey
+    const refreshLive = () =>
+      fetchHomeLive({ force: true, background: true }) ?? Promise.resolve()
+    const refreshPaged = (tabValue: PagedTabValue) =>
+      loadTabPage(tabValue, 1, true, true, previousSelection)
+    const activeTab = tab
+    const primary =
+      activeTab === "live" ? refreshLive() : refreshPaged(activeTab)
+
+    void Promise.resolve(primary).then(() => {
+      if (stale()) return
+      if (activeTab !== "live") void refreshLive()
+      for (const tabValue of ["archive", "clips"] as PagedTabValue[]) {
+        if (tabValue !== activeTab) void refreshPaged(tabValue)
+      }
+    })
   }
 
   useEffect(() => {
     if (!storageHydrated) return
     void loadOrgs()
-    void fetchHomeLive(INITIAL_LIVE_REFRESH)
+    void fetchHomeLive({ force: true })
     void loadTabPage("archive", 1)
     void loadTabPage("clips", 1)
   }, [fetchHomeLive, loadOrgs, loadTabPage, storageHydrated])
-
-  const selectedKey = JSON.stringify(selectedHomeOrgs)
-
-  useEffect(() => {
-    if (!storageHydrated) return
-    if (previousSelectedKey.current === selectedKey) return
-    previousSelectedKey.current = selectedKey
-    clearPagedSources()
-    setTabStates(initialTabStates())
-    void fetchHomeLive(INITIAL_LIVE_REFRESH)
-    for (const tabValue of ["archive", "clips"] as PagedTabValue[]) {
-      void loadTabPage(tabValue, 1, true)
-    }
-  }, [fetchHomeLive, loadTabPage, selectedKey, storageHydrated])
 
   useEffect(() => {
     if (!storageHydrated) return
@@ -932,18 +1145,8 @@ export function HomeClient() {
     return () => window.clearInterval(interval)
   }, [refreshAll, storageHydrated])
 
-  const liveStreams = useMemo(
-    () =>
-      homeLive
-        .filter((video) => video.status === "live")
-        .sort((a, b) => getLiveViewerCount(b) - getLiveViewerCount(a)),
-    [homeLive]
-  )
-  const upcomingStreams = useMemo(
-    () =>
-      homeLive
-        .filter((video) => video.status === "upcoming")
-        .sort(upcomingComparator),
+  const { liveStreams, upcomingStreams } = useMemo(
+    () => groupHomeVideos(homeLive),
     [homeLive]
   )
 
@@ -954,7 +1157,7 @@ export function HomeClient() {
     const nextTab = value as TabValue
     if (isPagedTabValue(nextTab)) {
       const tabState = tabStatesRef.current[nextTab]
-      if (!tabState.items.length && !tabState.loading && !tabState.error) {
+      if (!tabState.pages.size && !tabState.loading && !tabState.error) {
         void loadTabPage(nextTab, tabState.currentPage)
       }
     }
@@ -997,6 +1200,7 @@ export function HomeClient() {
               orgsError={orgsError}
               selectedNames={selectedHomeOrgs}
               fetchOrgs={loadOrgs}
+              onDraftChange={prefetchDraftOrgs}
               onApply={setSelectedHomeOrgs}
             />
           </header>
@@ -1007,10 +1211,11 @@ export function HomeClient() {
               <TabsTrigger value="archive">Archive</TabsTrigger>
               <TabsTrigger value="clips">Clips</TabsTrigger>
             </TabsList>
+            <FetchActivityIndicator />
           </div>
         </div>
 
-        <TabsContent value="live" forceMount>
+        <TabsContent value="live" keepMounted>
           {homeError ? (
             <Alert variant="destructive">
               <AlertTitle>Live load failed</AlertTitle>
@@ -1040,7 +1245,7 @@ export function HomeClient() {
           {upcomingStreams.length ? <VideoGrid videos={upcomingStreams} /> : null}
         </TabsContent>
 
-        <TabsContent value="archive" forceMount>
+        <TabsContent value="archive" keepMounted>
           <PagedTabContent
             tabValue="archive"
             state={archiveState}
@@ -1048,7 +1253,7 @@ export function HomeClient() {
           />
         </TabsContent>
 
-        <TabsContent value="clips" forceMount>
+        <TabsContent value="clips" keepMounted>
           <PagedTabContent
             tabValue="clips"
             state={clipsState}

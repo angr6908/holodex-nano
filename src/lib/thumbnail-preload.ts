@@ -1,10 +1,41 @@
 import type { HolodexVideo } from "@/lib/types"
 import { videoImage } from "@/lib/video-utils"
 
-const preloadedSources = new Map<string, HTMLImageElement | true>()
+type PreloadEntry = {
+  image: HTMLImageElement
+  ready: Promise<void>
+}
 
-export function preloadVideoThumbnails(videos: HolodexVideo[], limit: number) {
-  if (typeof window === "undefined" || limit <= 0) return
+const preloadedSources = new Map<string, PreloadEntry>()
+
+function preloadSource(source: string) {
+  const existing = preloadedSources.get(source)
+  if (existing) return existing.ready
+
+  const image = new window.Image()
+  image.decoding = "async"
+
+  const ready = new Promise<void>((resolve) => {
+    image.onload = () => {
+      if (typeof image.decode === "function") {
+        void image.decode().catch(() => {}).then(resolve)
+      } else {
+        resolve()
+      }
+    }
+    image.onerror = () => {
+      preloadedSources.delete(source)
+      resolve()
+    }
+  })
+
+  preloadedSources.set(source, { image, ready })
+  image.src = source
+  return ready
+}
+
+export function preloadVideoThumbnails(videos: HolodexVideo[]) {
+  if (typeof window === "undefined") return Promise.resolve()
 
   const sources = [
     ...new Set(
@@ -12,16 +43,7 @@ export function preloadVideoThumbnails(videos: HolodexVideo[], limit: number) {
         .map((video) => videoImage(video))
         .filter((source): source is string => Boolean(source))
     ),
-  ].slice(0, limit)
+  ]
 
-  for (const source of sources) {
-    if (preloadedSources.has(source)) continue
-
-    const image = new window.Image()
-    image.decoding = "async"
-    image.onload = () => preloadedSources.set(source, true)
-    image.onerror = () => preloadedSources.delete(source)
-    preloadedSources.set(source, image)
-    image.src = source
-  }
+  return Promise.all(sources.map(preloadSource)).then(() => undefined)
 }

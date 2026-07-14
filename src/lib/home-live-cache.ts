@@ -1,4 +1,5 @@
 import type { HolodexVideo } from "@/lib/types"
+import { readJsonStorage, writeJsonStorage } from "@/lib/storage"
 
 const HOME_LIVE_STORAGE_KEY = "holodex-nano-home-live"
 const HOME_LIVE_CACHE_TTL_MS = 10 * 60 * 1000
@@ -42,44 +43,31 @@ function slimHomeLiveVideo(video: HolodexVideo): HolodexVideo {
 }
 
 export function readStoredHomeLive(cacheKey: string): StoredHomeLive | null {
-  if (typeof window === "undefined") return null
-  try {
-    const parsed = JSON.parse(
-      window.localStorage.getItem(HOME_LIVE_STORAGE_KEY) || "null"
-    ) as {
-      cacheKey?: string
-      updatedAt?: number
-      videos?: HolodexVideo[]
-    } | null
+  const parsed = readJsonStorage(HOME_LIVE_STORAGE_KEY) as {
+    cacheKey?: string
+    updatedAt?: number
+    videos?: HolodexVideo[]
+  } | null
 
-    if (
-      parsed?.cacheKey !== cacheKey ||
-      !Array.isArray(parsed.videos) ||
-      !Number.isFinite(parsed.updatedAt)
-    ) {
-      return null
-    }
-
-    const updatedAt = Number(parsed.updatedAt)
-    if (Date.now() - updatedAt > HOME_LIVE_CACHE_TTL_MS) return null
-    return { updatedAt, videos: parsed.videos }
-  } catch {
+  if (
+    parsed?.cacheKey !== cacheKey ||
+    !Array.isArray(parsed.videos) ||
+    !Number.isFinite(parsed.updatedAt)
+  ) {
     return null
   }
+
+  const updatedAt = Number(parsed.updatedAt)
+  if (Date.now() - updatedAt > HOME_LIVE_CACHE_TTL_MS) return null
+  return { updatedAt, videos: parsed.videos }
 }
 
 export function writeStoredHomeLive(cacheKey: string, videos: HolodexVideo[]) {
   const updatedAt = Date.now()
-  if (typeof window === "undefined") return updatedAt
-  try {
-    window.localStorage.setItem(
-      HOME_LIVE_STORAGE_KEY,
-      JSON.stringify({
-        cacheKey,
-        updatedAt,
-        videos: videos.map(slimHomeLiveVideo),
-      })
-    )
-  } catch {}
+  writeJsonStorage(HOME_LIVE_STORAGE_KEY, {
+    cacheKey,
+    updatedAt,
+    videos: videos.map(slimHomeLiveVideo),
+  })
   return updatedAt
 }

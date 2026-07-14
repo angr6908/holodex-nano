@@ -1,8 +1,15 @@
 "use client"
 
-import { memo, useEffect, useMemo, useState, useSyncExternalStore } from "react"
+import { memo, useEffect, useState, useSyncExternalStore } from "react"
+import type { MouseEvent } from "react"
 import { Clock, Radio } from "lucide-react"
 
+import {
+  getClickedVideoIds,
+  getServerClickedVideoIds,
+  markVideoClicked,
+  subscribeClickedVideos,
+} from "@/lib/clicked-videos"
 import type { HolodexVideo } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import {
@@ -10,6 +17,7 @@ import {
   externalVideoUrl,
   formatCount,
   formatDuration,
+  formatUpcomingTime,
   formatVideoEndTime,
   getLiveViewerCount,
   videoImage,
@@ -23,41 +31,31 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 
-const TWO_HOURS_MS = 2 * 60 * 60 * 1000
-const CLICKED_VIDEO_STORAGE_KEY = "holodex-nano-clicked-videos"
-const CLICKED_VIDEO_EVENT = "holodex-nano-clicked-video"
+const UPCOMING_TICK_MS = 30_000
 
-function readClickedVideoSnapshot() {
-  if (typeof window === "undefined") return "[]"
-  return window.localStorage.getItem(CLICKED_VIDEO_STORAGE_KEY) || "[]"
+type VideoCardProps = {
+  video: HolodexVideo
+  eagerThumbnail?: boolean
+  priorityThumbnail?: boolean
 }
 
-function parseClickedVideoIds(snapshot: string) {
-  try {
-    const parsed = JSON.parse(snapshot)
-    return Array.isArray(parsed) ? new Set(parsed.map(String)) : new Set<string>()
-  } catch {
-    return new Set<string>()
+const tickListeners = new Set<() => void>()
+let tickInterval: number | null = null
+
+function subscribeUpcomingTick(listener: () => void) {
+  tickListeners.add(listener)
+  if (tickInterval === null) {
+    tickInterval = window.setInterval(() => {
+      tickListeners.forEach((notify) => notify())
+    }, UPCOMING_TICK_MS)
   }
-}
-
-function subscribeClickedVideos(onStoreChange: () => void) {
-  window.addEventListener("storage", onStoreChange)
-  window.addEventListener(CLICKED_VIDEO_EVENT, onStoreChange)
   return () => {
-    window.removeEventListener("storage", onStoreChange)
-    window.removeEventListener(CLICKED_VIDEO_EVENT, onStoreChange)
+    tickListeners.delete(listener)
+    if (!tickListeners.size && tickInterval !== null) {
+      window.clearInterval(tickInterval)
+      tickInterval = null
+    }
   }
-}
-
-function markVideoClicked(videoId: string) {
-  const clickedIds = parseClickedVideoIds(readClickedVideoSnapshot())
-  clickedIds.add(videoId)
-  window.localStorage.setItem(
-    CLICKED_VIDEO_STORAGE_KEY,
-    JSON.stringify([...clickedIds])
-  )
-  window.dispatchEvent(new Event(CLICKED_VIDEO_EVENT))
 }
 
 function hasTextSelection() {
@@ -77,57 +75,16 @@ function selectElementText(element: HTMLElement) {
   selection.addRange(range)
 }
 
-function upcomingTimestamp(video: HolodexVideo) {
-  return video.start_scheduled || video.available_at || video.start_actual || ""
-}
-
-function formatCountdown(ms: number) {
-  if (ms <= 0) return "soon"
-  const totalMinutes = Math.ceil(ms / 60_000)
-  const hours = Math.floor(totalMinutes / 60)
-  const minutes = totalMinutes % 60
-
-  if (!hours) return `${totalMinutes}m`
-  return minutes ? `${hours}h ${minutes}m` : `${hours}h`
-}
-
-function formatUpcomingTime(video: HolodexVideo, now: number) {
-  const value = upcomingTimestamp(video)
-  if (!value) return ""
-
-  const time = new Date(value)
-  if (!Number.isFinite(time.getTime())) return ""
-
-  const diff = time.getTime() - now
-  if (diff > 0 && diff < TWO_HOURS_MS) return formatCountdown(diff)
-
-  const today = new Date(now)
-  const isToday = time.toDateString() === today.toDateString()
-
-  return new Intl.DateTimeFormat("en", {
-    month: isToday ? undefined : "short",
-    day: isToday ? undefined : "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(time)
-}
-
 function VideoCardComponent({
   video,
   eagerThumbnail = false,
-}: {
-  video: HolodexVideo
-  eagerThumbnail?: boolean
-}) {
+  priorityThumbnail = false,
+}: VideoCardProps) {
   const [now, setNow] = useState(0)
-  const clickedVideoSnapshot = useSyncExternalStore(
+  const clickedVideoIds = useSyncExternalStore(
     subscribeClickedVideos,
-    readClickedVideoSnapshot,
-    () => "[]"
-  )
-  const clickedVideoIds = useMemo(
-    () => parseClickedVideoIds(clickedVideoSnapshot),
-    [clickedVideoSnapshot]
+    getClickedVideoIds,
+    getServerClickedVideoIds
   )
   const title = videoTitle(video)
   const titleClicked = clickedVideoIds.has(video.id)
@@ -147,13 +104,24 @@ function VideoCardComponent({
   useEffect(() => {
     if (!isUpcoming) return
     const update = () => setNow(Date.now())
-    const timeout = window.setTimeout(update, 0)
-    const interval = window.setInterval(update, 30_000)
-    return () => {
-      window.clearTimeout(timeout)
-      window.clearInterval(interval)
-    }
+    update()
+    return subscribeUpcomingTick(update)
   }, [isUpcoming])
+
+  const anchorHandlers = {
+    onClick: (event: MouseEvent<HTMLAnchorElement>) => {
+      event.stopPropagation()
+      if (hasTextSelection()) {
+        event.preventDefault()
+        return
+      }
+      markVideoClicked(video.id)
+    },
+    onAuxClick: (event: MouseEvent<HTMLAnchorElement>) => {
+      event.stopPropagation()
+      if (event.button === 1) markVideoClicked(video.id)
+    },
+  }
 
   function openVideo() {
     markVideoClicked(video.id)
@@ -170,7 +138,7 @@ function VideoCardComponent({
       size="sm"
       role="link"
       tabIndex={0}
-      className="h-full cursor-pointer p-0 data-[size=sm]:py-0"
+      className="video-card h-full cursor-pointer p-0 data-[size=sm]:py-0"
       onClick={handleOpen}
       onAuxClick={(event) => {
         if (event.button === 1) openVideo()
@@ -182,7 +150,15 @@ function VideoCardComponent({
       }}
       onDragStart={(event) => event.preventDefault()}
     >
-      <div className="isolate relative aspect-video w-full overflow-hidden rounded-t-xl bg-muted">
+      <a
+        href={href}
+        target="_blank"
+        rel="noreferrer"
+        tabIndex={-1}
+        aria-hidden="true"
+        className="isolate relative block aspect-video w-full overflow-hidden rounded-t-xl bg-muted"
+        {...anchorHandlers}
+      >
         {image ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img
@@ -190,9 +166,9 @@ function VideoCardComponent({
             width={640}
             height={360}
             alt=""
-            decoding="async"
+            decoding={priorityThumbnail ? "sync" : "async"}
             draggable={false}
-            fetchPriority={eagerThumbnail ? "high" : "auto"}
+            fetchPriority={priorityThumbnail ? "high" : "auto"}
             loading={eagerThumbnail ? "eager" : "lazy"}
             className="video-card-thumbnail"
           />
@@ -205,7 +181,7 @@ function VideoCardComponent({
             {durationText}
           </Badge>
         ) : null}
-      </div>
+      </a>
       <CardHeader className="pb-2.5">
         <CardTitle className="line-clamp-2 min-h-[2lh]">
           <a
@@ -218,18 +194,7 @@ function VideoCardComponent({
                 ? "text-muted-foreground"
                 : "text-foreground"
             )}
-            onClick={(event) => {
-              event.stopPropagation()
-              if (hasTextSelection()) {
-                event.preventDefault()
-                return
-              }
-              markVideoClicked(video.id)
-            }}
-            onAuxClick={(event) => {
-              event.stopPropagation()
-              if (event.button === 1) markVideoClicked(video.id)
-            }}
+            {...anchorHandlers}
             onMouseDown={(event) => {
               if (event.button === 2) selectElementText(event.currentTarget)
             }}
@@ -275,4 +240,35 @@ function VideoCardComponent({
   )
 }
 
-export const VideoCard = memo(VideoCardComponent)
+export function videoRenderEqual(a: HolodexVideo, b: HolodexVideo) {
+  if (a === b) return true
+
+  return (
+    a.id === b.id &&
+    a.title === b.title &&
+    a.jp_name === b.jp_name &&
+    a.type === b.type &&
+    a.status === b.status &&
+    a.thumbnail === b.thumbnail &&
+    a.link === b.link &&
+    a.duration === b.duration &&
+    a.available_at === b.available_at &&
+    a.start_actual === b.start_actual &&
+    a.start_scheduled === b.start_scheduled &&
+    getLiveViewerCount(a) === getLiveViewerCount(b) &&
+    a.channel?.name === b.channel?.name &&
+    a.channel?.english_name === b.channel?.english_name &&
+    a.channel?.twitch === b.channel?.twitch
+  )
+}
+
+function videoCardPropsEqual(previous: VideoCardProps, next: VideoCardProps) {
+  return (
+    (previous.eagerThumbnail || false) === (next.eagerThumbnail || false) &&
+    (previous.priorityThumbnail || false) ===
+      (next.priorityThumbnail || false) &&
+    videoRenderEqual(previous.video, next.video)
+  )
+}
+
+export const VideoCard = memo(VideoCardComponent, videoCardPropsEqual)

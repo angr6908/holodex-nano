@@ -37,8 +37,15 @@ export function formatOrgDisplayName(name: string): string {
 
 export function normalizeSelectedHomeOrgs(orgs: string[]): string[] {
   return [
-    ...new Set((orgs || []).filter((name) => name && name !== "All Vtubers")),
+    ...new Set(
+      (orgs || []).filter((name) => name && name !== allVtubersOrg.name)
+    ),
   ]
+}
+
+export function resolveOrgTargets(selected: string[]): string[] {
+  const targets = (selected || []).filter(Boolean)
+  return targets.length ? targets : [allVtubersOrg.name]
 }
 
 export function normalizeOrgs(payload: unknown): Org[] {
@@ -58,6 +65,5 @@ export function normalizeOrgs(payload: unknown): Org[] {
 }
 
 export function makeLiveCacheKey(orgTargets: string[]) {
-  const targets = (orgTargets || []).filter(Boolean)
-  return JSON.stringify(targets.length ? [...targets].sort() : ["All Vtubers"])
+  return JSON.stringify([...resolveOrgTargets(orgTargets)].sort())
 }

@@ -88,6 +88,10 @@
 }
 
 @layer components {
+  .video-card {
+    contain: layout paint;
+  }
+
   .video-card-thumbnail {
     position: absolute;
     inset: 0;
@@ -99,5 +103,6 @@
     object-fit: cover;
     object-position: center;
     user-select: none;
+    pointer-events: none;
   }
 }

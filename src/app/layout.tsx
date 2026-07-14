@@ -1,8 +1,11 @@
 import type { Metadata } from "next";
-import { TooltipProvider } from "@/components/ui/tooltip";
 import "./globals.css";
 import { Geist } from "next/font/google";
 import { cn } from "@/lib/utils";
+import {
+  TWITCH_THUMBNAIL_HOST,
+  YOUTUBE_THUMBNAIL_HOST,
+} from "@/lib/video-utils";
 
 const geist = Geist({subsets:['latin'],variable:'--font-sans'});
 
@@ -18,9 +21,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className={cn("dark h-full antialiased font-sans", geist.variable)}>
-      <body className="min-h-full flex flex-col">
-        <TooltipProvider>{children}</TooltipProvider>
-      </body>
+      <link rel="preconnect" href={YOUTUBE_THUMBNAIL_HOST} />
+      <link rel="preconnect" href={TWITCH_THUMBNAIL_HOST} />
+      <body className="min-h-full flex flex-col">{children}</body>
     </html>
   );
 }

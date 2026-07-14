@@ -1,22 +1,21 @@
 import type { NextRequest } from "next/server"
 
-export const runtime = "nodejs"
+import {
+  holodexSpoofHeaders,
+  holodexTarget,
+  upstreamResponse,
+} from "@/lib/holodex-proxy"
 
-const API_BASE_URL = "https://holodex.net"
+export const runtime = "nodejs"
 
 async function proxy(
   request: NextRequest,
   context: { params: Promise<{ path: string[] }> }
 ) {
   const { path } = await context.params
-  const target = new URL(
-    `${API_BASE_URL}/api/${(path || []).map(encodeURIComponent).join("/")}`
-  )
-  target.search = new URL(request.url).search
+  const target = holodexTarget("api", path, new URL(request.url).search)
 
-  const headers = new Headers(request.headers)
-  headers.set("origin", API_BASE_URL)
-  headers.set("referer", `${API_BASE_URL}/`)
+  const headers = holodexSpoofHeaders(request.headers)
   headers.delete("host")
 
   if (process.env.HOLODEX_API_KEY && !headers.has("x-apikey")) {
@@ -33,16 +32,7 @@ async function proxy(
     init.body = await request.arrayBuffer()
   }
 
-  const upstream = await fetch(target, init)
-  const outHeaders = new Headers(upstream.headers)
-  outHeaders.delete("content-encoding")
-  outHeaders.delete("content-length")
-
-  return new Response(upstream.body, {
-    status: upstream.status,
-    statusText: upstream.statusText,
-    headers: outHeaders,
-  })
+  return upstreamResponse(await fetch(target, init))
 }
 
 export const GET = proxy

@@ -3,6 +3,35 @@ import type { HolodexVideo } from "@/lib/types"
 export const TWITCH_VIDEO_URL_REGEX =
   /(?:(?:https?:|)\/\/|)(?:www\.)?twitch\.tv\/([\w-]+)/i
 
+export const YOUTUBE_THUMBNAIL_HOST = "https://i.ytimg.com"
+export const TWITCH_THUMBNAIL_HOST = "https://static-cdn.jtvnw.net"
+
+const TWO_HOURS_MS = 2 * 60 * 60 * 1000
+
+const relativeTimeFormat = new Intl.RelativeTimeFormat("en", {
+  numeric: "auto",
+})
+const shortDateTimeFormat = new Intl.DateTimeFormat("en", {
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+})
+const timeOnlyFormat = new Intl.DateTimeFormat("en", {
+  hour: "numeric",
+  minute: "2-digit",
+})
+const compactCountFormat = new Intl.NumberFormat("en", {
+  compactDisplay: "short",
+  notation: "compact",
+  maximumSignificantDigits: 3,
+})
+
+export function parseTimeMs(value?: string | null) {
+  const time = new Date(value || "").getTime()
+  return Number.isFinite(time) ? time : 0
+}
+
 export function dedupeVideos(videos: HolodexVideo[]) {
   return Array.from(new Map((videos || []).map((video) => [video.id, video])).values())
 }
@@ -21,25 +50,33 @@ export function videoTemporalComparator(a: HolodexVideo, b: HolodexVideo) {
   if (a.available_at === b.available_at) {
     return String(a.id).localeCompare(String(b.id))
   }
-  return (
-    new Date(a.available_at || "").getTime() -
-    new Date(b.available_at || "").getTime()
-  )
+  return parseTimeMs(a.available_at) - parseTimeMs(b.available_at)
 }
+
+const endTimestampCache = new WeakMap<HolodexVideo, number>()
 
 export function videoEndTimestamp(video: HolodexVideo) {
   if (!video) return 0
-  const start = video.start_actual || video.available_at || video.start_scheduled
-  const startTime = new Date(start || "").getTime()
-  if (!Number.isFinite(startTime)) return 0
-  if (
+  const cached = endTimestampCache.get(video)
+  if (cached !== undefined) return cached
+  const startTime = parseTimeMs(
+    video.start_actual || video.available_at || video.start_scheduled
+  )
+  const endTime =
+    startTime &&
     video.status === "past" &&
     video.type === "stream" &&
     Number(video.duration) > 0
-  ) {
-    return startTime + Number(video.duration) * 1000
-  }
-  return startTime
+      ? startTime + Number(video.duration) * 1000
+      : startTime
+  endTimestampCache.set(video, endTime)
+  return endTime
+}
+
+export function upcomingStartTimestamp(video: HolodexVideo) {
+  return parseTimeMs(
+    video.start_scheduled || video.available_at || video.start_actual
+  )
 }
 
 function formatRelativeOrDateTime(timestamp: number) {
@@ -47,16 +84,36 @@ function formatRelativeOrDateTime(timestamp: number) {
 
   const diff = timestamp - Date.now()
   const abs = Math.abs(diff)
-  const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" })
   if (abs < 60_000) return diff > 0 ? "soon" : "just now"
-  if (abs < 3_600_000) return rtf.format(Math.round(diff / 60_000), "minute")
-  if (abs < 86_400_000) return rtf.format(Math.round(diff / 3_600_000), "hour")
-  return new Intl.DateTimeFormat("en", {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(timestamp)
+  if (abs < 3_600_000) {
+    return relativeTimeFormat.format(Math.round(diff / 60_000), "minute")
+  }
+  if (abs < 86_400_000) {
+    return relativeTimeFormat.format(Math.round(diff / 3_600_000), "hour")
+  }
+  return shortDateTimeFormat.format(timestamp)
+}
+
+function formatCountdown(ms: number) {
+  if (ms <= 0) return "soon"
+  const totalMinutes = Math.ceil(ms / 60_000)
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+
+  if (!hours) return `${totalMinutes}m`
+  return minutes ? `${hours}h ${minutes}m` : `${hours}h`
+}
+
+export function formatUpcomingTime(video: HolodexVideo, now: number) {
+  const time = upcomingStartTimestamp(video)
+  if (!time) return ""
+
+  const diff = time - now
+  if (diff > 0 && diff < TWO_HOURS_MS) return formatCountdown(diff)
+
+  const isToday =
+    new Date(time).toDateString() === new Date(now).toDateString()
+  return (isToday ? timeOnlyFormat : shortDateTimeFormat).format(time)
 }
 
 export function getLiveViewerCount(video?: HolodexVideo | null) {
@@ -66,11 +123,7 @@ export function getLiveViewerCount(video?: HolodexVideo | null) {
 
 export function formatCount(n: unknown) {
   const value = typeof n === "string" ? Number(n) : Number(n || 0)
-  return new Intl.NumberFormat("en", {
-    compactDisplay: "short",
-    notation: "compact",
-    maximumSignificantDigits: 3,
-  }).format(Number.isFinite(value) ? value : 0)
+  return compactCountFormat.format(Number.isFinite(value) ? value : 0)
 }
 
 export function decodeHTMLEntities(str = "") {
@@ -90,7 +143,7 @@ function isYoutubeVideoId(value?: string) {
 }
 
 function youtubeThumbnailUrl(videoId: string) {
-  return `https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/sddefault.jpg`
+  return `${YOUTUBE_THUMBNAIL_HOST}/vi/${encodeURIComponent(videoId)}/sddefault.jpg`
 }
 
 export function staticThumbnailPath(
@@ -113,7 +166,7 @@ export function videoImage(video: HolodexVideo) {
 
   const twitchLogin = getTwitchLogin(video)
   if (twitchLogin) {
-    return `https://static-cdn.jtvnw.net/previews-ttv/live_user_${encodeURIComponent(
+    return `${TWITCH_THUMBNAIL_HOST}/previews-ttv/live_user_${encodeURIComponent(
       twitchLogin
     )}-640x360.jpg`
   }
@@ -146,12 +199,10 @@ export function externalVideoUrl(video: HolodexVideo) {
 }
 
 export function formatVideoEndTime(video: HolodexVideo) {
-  const uploadTime = new Date(video.available_at || "").getTime()
+  const uploadTime = parseTimeMs(video.available_at)
   const computedEndTime = videoEndTimestamp(video)
   const endTime =
-    computedEndTime > Date.now() && Number.isFinite(uploadTime)
-      ? uploadTime
-      : computedEndTime
+    computedEndTime > Date.now() && uploadTime ? uploadTime : computedEndTime
   return formatRelativeOrDateTime(endTime)
 }
 
@@ -167,7 +218,7 @@ export function formatDuration(seconds?: number) {
 
 export function isLiveInsideScheduleWindow(video: HolodexVideo) {
   if (video.start_actual) return true
-  const start = new Date(video.start_scheduled || "").getTime()
-  if (!Number.isFinite(start)) return true
-  return Date.now() <= start + 2 * 60 * 60 * 1000
+  const start = parseTimeMs(video.start_scheduled)
+  if (!start) return true
+  return Date.now() <= start + TWO_HOURS_MS
 }

@@ -1,10 +1,18 @@
 "use client"
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import {
+  startTransition,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react"
 import { Building2, ChevronDown, RotateCcw } from "lucide-react"
 
 import type { Org } from "@/lib/types"
 import {
+  allVtubersOrg,
   formatOrgDisplayName,
   preferredOrgNames,
 } from "@/lib/orgs"
@@ -32,13 +40,18 @@ type HomeOrgMultiSelectProps = {
   orgsError: string | null
   selectedNames: string[]
   fetchOrgs: () => Promise<Org[]>
+  onDraftChange?: (draft: string[]) => void
   onApply: (value: string[]) => void
-  emptySelectionLabel?: string
-  clearSelectionLabel?: string
-  fallbackSelection?: string[]
 }
 
-const allSelectionKey = "__all_selection__"
+let measureContext: CanvasRenderingContext2D | null = null
+
+function getMeasureContext() {
+  if (!measureContext && typeof document !== "undefined") {
+    measureContext = document.createElement("canvas").getContext("2d")
+  }
+  return measureContext
+}
 
 function orgCountLabel(count: number) {
   return `${count} ${count === 1 ? "Org" : "Orgs"}`
@@ -46,19 +59,13 @@ function orgCountLabel(count: number) {
 
 function buildOrgSelectionLabel(
   selectedNames: string[],
-  emptySelectionLabel: string,
   labelWidth: number,
   font: string
 ) {
-  if (selectedNames.length === 0) return emptySelectionLabel
+  if (selectedNames.length === 0) return allVtubersOrg.name
 
   const selectedLabels = selectedNames.map((name) => formatOrgDisplayName(name))
-  if (!labelWidth || typeof document === "undefined") {
-    return selectedLabels.join(" + ")
-  }
-
-  const canvas = document.createElement("canvas")
-  const context = canvas.getContext("2d")
+  const context = labelWidth ? getMeasureContext() : null
   if (!context) return selectedLabels.join(" + ")
   context.font = font
 
@@ -84,10 +91,8 @@ export function HomeOrgMultiSelect({
   orgsError,
   selectedNames,
   fetchOrgs,
+  onDraftChange,
   onApply,
-  emptySelectionLabel = "All Vtubers",
-  clearSelectionLabel = "All Vtubers",
-  fallbackSelection = [],
 }: HomeOrgMultiSelectProps) {
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState("")
@@ -103,43 +108,18 @@ export function HomeOrgMultiSelect({
   }, [fetchOrgs, orgs.length])
 
   const selectableOrgs = useMemo(
-    () => (orgs || []).filter((org) => org.name !== "All Vtubers"),
+    () => (orgs || []).filter((org) => org.name !== allVtubersOrg.name),
     [orgs]
   )
 
   const workingSelectedNames = open ? draftSelectedNames : selectedNames
 
-  const quickSelectOrgNames = useMemo(() => {
+  const quickSelectOrgOptions = useMemo(() => {
     const available = new Set(selectableOrgs.map((org) => org.name))
-    return preferredOrgNames.filter((name) => available.has(name))
+    return preferredOrgNames
+      .filter((name) => available.has(name))
+      .map((name) => ({ value: name, label: formatOrgDisplayName(name) }))
   }, [selectableOrgs])
-
-  const { quickSelectOptions, quickSelectAllOption, quickSelectOrgOptions } =
-    useMemo(() => {
-      const quickSelectOrgOptions = quickSelectOrgNames.map((name) => ({
-        key: name,
-        type: "org",
-        value: name,
-        label: formatOrgDisplayName(name),
-      }))
-      const quickSelectAllOption =
-        fallbackSelection.length === 0
-          ? {
-              key: allSelectionKey,
-              type: "all",
-              value: null as string | null,
-              label: clearSelectionLabel,
-            }
-          : null
-      const quickSelectOptions = quickSelectAllOption
-        ? [quickSelectAllOption, ...quickSelectOrgOptions]
-        : quickSelectOrgOptions
-      return {
-        quickSelectOptions,
-        quickSelectAllOption,
-        quickSelectOrgOptions,
-      }
-    }, [clearSelectionLabel, fallbackSelection.length, quickSelectOrgNames])
 
   const filteredOrgs = useMemo(() => {
     const query = search.trim().toLowerCase()
@@ -157,10 +137,15 @@ export function HomeOrgMultiSelect({
 
     const updateLabelMetrics = () => {
       const style = window.getComputedStyle(label)
-      setLabelMetrics({
+      const next = {
         font: style.font,
         width: label.getBoundingClientRect().width,
-      })
+      }
+      setLabelMetrics((current) =>
+        current.font === next.font && current.width === next.width
+          ? current
+          : next
+      )
     }
 
     updateLabelMetrics()
@@ -171,20 +156,13 @@ export function HomeOrgMultiSelect({
 
   const triggerLabel = useMemo(
     () =>
-      buildOrgSelectionLabel(
-        selectedNames,
-        emptySelectionLabel,
-        labelMetrics.width,
-        labelMetrics.font
-      ),
-    [emptySelectionLabel, labelMetrics.font, labelMetrics.width, selectedNames]
+      buildOrgSelectionLabel(selectedNames, labelMetrics.width, labelMetrics.font),
+    [labelMetrics.font, labelMetrics.width, selectedNames]
   )
 
   async function openSelector() {
     if (!orgs.length) await fetchOrgs()
-    setDraftSelectedNames(
-      selectedNames.length ? [...selectedNames] : [...fallbackSelection]
-    )
+    setDraftSelectedNames([...selectedNames])
     setSearch("")
     setOpen(true)
   }
@@ -194,9 +172,9 @@ export function HomeOrgMultiSelect({
       void openSelector()
       return
     }
-    applySelection(draftSelectedNames)
     setOpen(false)
     setSearch("")
+    startTransition(() => applySelection(draftSelectedNames))
   }
 
   function toggleName(name: string) {
@@ -204,10 +182,12 @@ export function HomeOrgMultiSelect({
       ? draftSelectedNames.filter((value) => value !== name)
       : [...draftSelectedNames, name]
     setDraftSelectedNames(next)
+    onDraftChange?.(next)
   }
 
   function clearSelection() {
-    setDraftSelectedNames([...fallbackSelection])
+    setDraftSelectedNames([])
+    onDraftChange?.([])
   }
 
   function applySelection(nextRaw: string[]) {
@@ -221,23 +201,25 @@ export function HomeOrgMultiSelect({
 
   return (
     <Popover open={open} onOpenChange={closeSelector}>
-      <PopoverTrigger asChild>
-        <Button
-          type="button"
-          variant="outline"
-          className="h-8 w-52 min-w-0 shrink justify-start gap-1.5 px-2.5 md:w-72"
-        >
-          <Building2 className="shrink-0" />
-          <span ref={labelRef} className="min-w-0 flex-1 truncate text-left">
-            {labelMetrics.width > 0 ? triggerLabel : null}
-          </span>
-          <ChevronDown className="ml-auto shrink-0" />
-        </Button>
+      <PopoverTrigger
+        render={
+          <Button
+            type="button"
+            variant="outline"
+            className="h-8 w-52 min-w-0 shrink justify-start gap-1.5 px-2.5 md:w-72"
+          />
+        }
+      >
+        <Building2 className="shrink-0" />
+        <span ref={labelRef} className="min-w-0 flex-1 truncate text-left">
+          {labelMetrics.width > 0 ? triggerLabel : null}
+        </span>
+        <ChevronDown className="ml-auto shrink-0" />
       </PopoverTrigger>
       <PopoverContent
         align="start"
-        className="w-[var(--radix-popover-trigger-width)] max-w-[calc(100vw-1rem)] p-0"
-        onOpenAutoFocus={(event) => event.preventDefault()}
+        className="w-[var(--anchor-width)] max-w-[calc(100vw-1rem)] p-0"
+        initialFocus={false}
       >
         <Command shouldFilter={false}>
           <CommandInput
@@ -253,41 +235,34 @@ export function HomeOrgMultiSelect({
               </Alert>
             ) : null}
 
-            {quickSelectOptions.length ? (
-              <CommandGroup heading="Quick Select">
-                <div className="flex flex-wrap gap-1.5">
-                  {quickSelectAllOption ? (
+            <CommandGroup heading="Quick Select">
+              <div className="flex flex-wrap gap-1.5">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={
+                    workingSelectedNames.length === 0 ? "default" : "secondary"
+                  }
+                  onClick={clearSelection}
+                >
+                  {allVtubersOrg.name}
+                </Button>
+                {quickSelectOrgOptions.map((option) => {
+                  const selected = workingSelectedNames.includes(option.value)
+                  return (
                     <Button
-                      key={quickSelectAllOption.key}
+                      key={option.value}
                       type="button"
                       size="sm"
-                      variant={
-                        workingSelectedNames.length === 0
-                          ? "default"
-                          : "secondary"
-                      }
-                      onClick={clearSelection}
+                      variant={selected ? "default" : "secondary"}
+                      onClick={() => toggleName(option.value)}
                     >
-                      {quickSelectAllOption.label}
+                      {option.label}
                     </Button>
-                  ) : null}
-                  {quickSelectOrgOptions.map((option) => {
-                    const selected = workingSelectedNames.includes(option.value)
-                    return (
-                      <Button
-                        key={option.key}
-                        type="button"
-                        size="sm"
-                        variant={selected ? "default" : "secondary"}
-                        onClick={() => toggleName(option.value)}
-                      >
-                        {option.label}
-                      </Button>
-                    )
-                  })}
-                </div>
-              </CommandGroup>
-            ) : null}
+                  )
+                })}
+              </div>
+            </CommandGroup>
 
             <CommandSeparator />
 
@@ -330,7 +305,7 @@ export function HomeOrgMultiSelect({
               onClick={clearSelection}
             >
               <RotateCcw />
-              {clearSelectionLabel}
+              {allVtubersOrg.name}
             </Button>
             <Button type="button" size="sm" onClick={() => closeSelector(false)}>
               Apply

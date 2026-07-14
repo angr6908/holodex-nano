@@ -1,8 +1,11 @@
 import type { HolodexVideo } from "@/lib/types"
+import { readJsonStorage, writeJsonStorage } from "@/lib/storage"
 import { getTwitchLogin } from "@/lib/video-utils"
 
-const TWITCH_GQL_ENDPOINTS = ["/twitch-gql", "https://gql.twitch.tv/gql"] as const
-const TWITCH_WEB_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
+export const TWITCH_GQL_URL = "https://gql.twitch.tv/gql"
+export const TWITCH_WEB_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
+
+const TWITCH_GQL_ENDPOINTS = ["/twitch-gql", TWITCH_GQL_URL] as const
 const CACHE_TTL_MS = 60_000
 const STORAGE_KEY = "holodex-nano-twitch-viewer-counts"
 
@@ -10,38 +13,37 @@ export const TWITCH_OFFLINE = -1
 
 const viewerCountCache = new Map<string, { ts: number; value: number }>()
 const inflightRequests = new Map<string, Promise<Record<string, number>>>()
+let cacheHydrated = false
 
 function normalizeLogin(login: string) {
   return login.trim().toLowerCase()
 }
 
 function readPersistedCache() {
-  if (typeof window === "undefined" || viewerCountCache.size) return
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(STORAGE_KEY) || "{}")
-    Object.entries(parsed || {}).forEach(([login, entry]) => {
-      const value = entry as { ts?: number; value?: number }
-      if (Number.isFinite(value.ts) && Number.isFinite(value.value)) {
-        viewerCountCache.set(normalizeLogin(login), {
-          ts: Number(value.ts),
-          value: Number(value.value),
-        })
-      }
-    })
-  } catch {}
+  if (typeof window === "undefined" || cacheHydrated) return
+  cacheHydrated = true
+  const parsed = readJsonStorage(STORAGE_KEY) as Record<
+    string,
+    { ts?: number; value?: number }
+  > | null
+  Object.entries(parsed || {}).forEach(([login, entry]) => {
+    if (Number.isFinite(entry?.ts) && Number.isFinite(entry?.value)) {
+      viewerCountCache.set(normalizeLogin(login), {
+        ts: Number(entry.ts),
+        value: Number(entry.value),
+      })
+    }
+  })
 }
 
 function persistViewerCountCache() {
-  if (typeof window === "undefined") return
-  try {
-    const now = Date.now()
-    const serializable = Object.fromEntries(
-      Array.from(viewerCountCache.entries()).filter(
-        ([, entry]) => now - entry.ts <= CACHE_TTL_MS
-      )
+  const now = Date.now()
+  const serializable = Object.fromEntries(
+    Array.from(viewerCountCache.entries()).filter(
+      ([, entry]) => now - entry.ts <= CACHE_TTL_MS
     )
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(serializable))
-  } catch {}
+  )
+  writeJsonStorage(STORAGE_KEY, serializable)
 }
 
 function getCachedViewerCount(login: string) {
@@ -51,7 +53,6 @@ function getCachedViewerCount(login: string) {
   if (!cached) return null
   if (Date.now() - cached.ts > CACHE_TTL_MS) {
     viewerCountCache.delete(normalized)
-    persistViewerCountCache()
     return null
   }
   return cached.value
@@ -95,6 +96,10 @@ async function requestViewerCounts(logins: string[]) {
       }
       const payload = await response.json()
       const data = Array.isArray(payload) ? payload[0]?.data : payload?.data
+      if (!data || typeof data !== "object") {
+        lastError = new Error("Twitch GQL response did not include data")
+        continue
+      }
       return logins.reduce(
         (acc, login, index) => {
           const stream = data?.[`u${index}`]?.stream
@@ -116,6 +121,17 @@ async function requestViewerCounts(logins: string[]) {
   throw lastError ?? new Error("Unable to resolve Twitch viewer counts")
 }
 
+function liveTwitchLogins(videos: HolodexVideo[]) {
+  return [
+    ...new Set(
+      (videos || [])
+        .filter((video) => video?.status === "live")
+        .map((video) => getTwitchLogin(video))
+        .filter((login): login is string => !!login)
+    ),
+  ]
+}
+
 export function readCachedTwitchViewerCounts(logins: string[]) {
   return [...new Set((logins || []).map((login) => normalizeLogin(login)))].reduce(
     (acc, login) => {
@@ -127,7 +143,10 @@ export function readCachedTwitchViewerCounts(logins: string[]) {
   )
 }
 
-export async function fetchTwitchViewerCounts(logins: string[]) {
+export async function fetchTwitchViewerCounts(
+  logins: string[],
+  opts: { force?: boolean } = {}
+) {
   const normalized = [
     ...new Set(
       (logins || [])
@@ -137,7 +156,7 @@ export async function fetchTwitchViewerCounts(logins: string[]) {
   ]
   if (!normalized.length) return {}
 
-  const cachedCounts = readCachedTwitchViewerCounts(normalized)
+  const cachedCounts = opts.force ? {} : readCachedTwitchViewerCounts(normalized)
   const missing = normalized.filter((login) => cachedCounts[login] === undefined)
   if (!missing.length) return cachedCounts
 
@@ -177,18 +196,17 @@ export function mergeTwitchViewerCountsIntoVideos(
   })
 }
 
+export function applyCachedTwitchViewerCounts(videos: HolodexVideo[]) {
+  const counts = readCachedTwitchViewerCounts(liveTwitchLogins(videos))
+  return mergeTwitchViewerCountsIntoVideos(videos, counts)
+}
+
 export async function enrichLiveVideosWithTwitchViewerCounts(
-  videos: HolodexVideo[]
+  videos: HolodexVideo[],
+  opts: { force?: boolean } = {}
 ) {
-  const logins = [
-    ...new Set(
-      (videos || [])
-        .filter((video) => video?.status === "live")
-        .map((video) => getTwitchLogin(video))
-        .filter((login): login is string => !!login)
-    ),
-  ]
+  const logins = liveTwitchLogins(videos)
   if (!logins.length) return videos
-  const counts = await fetchTwitchViewerCounts(logins)
+  const counts = await fetchTwitchViewerCounts(logins, opts)
   return mergeTwitchViewerCountsIntoVideos(videos, counts)
 }

@@ -1,13 +1,14 @@
+import { TWITCH_GQL_URL, TWITCH_WEB_CLIENT_ID } from "@/lib/twitch"
+
 export const runtime = "nodejs"
 
 export async function POST(request: Request) {
   const body = await request.text()
-  const upstream = await fetch("https://gql.twitch.tv/gql", {
+  const upstream = await fetch(TWITCH_GQL_URL, {
     method: "POST",
     headers: {
       accept: "application/json",
-      "client-id":
-        request.headers.get("client-id") || "kimne78kx3ncx6brgo4mv6wki5h1ko",
+      "client-id": request.headers.get("client-id") || TWITCH_WEB_CLIENT_ID,
       "content-type": "application/json",
       origin: "https://www.twitch.tv",
       referer: "https://www.twitch.tv/",
