@@ -75,7 +75,10 @@ function buildViewerCountQuery(logins: string[]) {
   return `query HolodexTwitchLiveViewerCounts {\n${fields}\n}`
 }
 
-async function requestViewerCounts(logins: string[]) {
+async function requestViewerCounts(
+  logins: string[],
+  priority: NonNullable<RequestInit["priority"]>
+) {
   const body = JSON.stringify({ query: buildViewerCountQuery(logins) })
   let lastError: unknown = null
 
@@ -89,6 +92,7 @@ async function requestViewerCounts(logins: string[]) {
           "content-type": "application/json",
         },
         body,
+        priority,
       })
       if (!response.ok) {
         lastError = new Error(`Twitch GQL request failed: ${response.status}`)
@@ -145,7 +149,10 @@ export function readCachedTwitchViewerCounts(logins: string[]) {
 
 export async function fetchTwitchViewerCounts(
   logins: string[],
-  opts: { force?: boolean } = {}
+  opts: {
+    force?: boolean
+    priority?: NonNullable<RequestInit["priority"]>
+  } = {}
 ) {
   const normalized = [
     ...new Set(
@@ -163,7 +170,7 @@ export async function fetchTwitchViewerCounts(
   const key = missing.join(",")
   let request = inflightRequests.get(key)
   if (!request) {
-    request = requestViewerCounts(missing)
+    request = requestViewerCounts(missing, opts.priority || "auto")
       .then((counts) => {
         Object.entries(counts).forEach(([login, value]) =>
           setCachedViewerCount(login, value)
@@ -203,7 +210,10 @@ export function applyCachedTwitchViewerCounts(videos: HolodexVideo[]) {
 
 export async function enrichLiveVideosWithTwitchViewerCounts(
   videos: HolodexVideo[],
-  opts: { force?: boolean } = {}
+  opts: {
+    force?: boolean
+    priority?: NonNullable<RequestInit["priority"]>
+  } = {}
 ) {
   const logins = liveTwitchLogins(videos)
   if (!logins.length) return videos

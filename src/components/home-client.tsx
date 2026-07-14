@@ -21,6 +21,7 @@ import {
   prefetchApi,
   subscribeFetchActivity,
 } from "@/lib/holodex"
+import type { FetchPriority } from "@/lib/holodex"
 import {
   readStoredHomeLive,
   writeStoredHomeLive,
@@ -106,7 +107,11 @@ type TabState = {
 }
 
 type PagedSource = {
-  ensure: (count: number) => Promise<void>
+  ensure: (
+    count: number,
+    silent?: boolean,
+    priority?: FetchPriority
+  ) => Promise<void>
   slice: (offset: number, limit: number) => HolodexVideo[]
   committedCount: () => number
   isExhausted: () => boolean
@@ -232,10 +237,14 @@ function prepareHomeLiveVideos(videos: HolodexVideo[]) {
 
 async function enrichLiveVideosBestEffort(
   videos: HolodexVideo[],
-  force = false
+  force = false,
+  priority: FetchPriority = "auto"
 ) {
   let timeoutId: ReturnType<typeof setTimeout> | undefined
-  const request = enrichLiveVideosWithTwitchViewerCounts(videos, { force })
+  const request = enrichLiveVideosWithTwitchViewerCounts(videos, {
+    force,
+    priority,
+  })
   try {
     return await Promise.race([
       request.then((enriched) => ({ videos: enriched, lateResult: null })),
@@ -360,14 +369,22 @@ function createPagedSource(
     return committedCache
   }
 
-  const fetchOrg = async (index: number) => {
+  const fetchOrg = async (
+    index: number,
+    silent: boolean,
+    priority: FetchPriority
+  ) => {
     try {
-      const payload = await fetchVideos({
-        ...query,
-        org: orgTargets[index],
-        limit: HOLODEX_PAGE_LIMIT,
-        offset: orgOffset[index],
-      })
+      const payload = await fetchVideos(
+        {
+          ...query,
+          org: orgTargets[index],
+          limit: HOLODEX_PAGE_LIMIT,
+          offset: orgOffset[index],
+        },
+        silent,
+        priority
+      )
       const items = extractItems(payload)
       if (items.length > 0) {
         orgItems[index] = orgItems[index].concat(items)
@@ -380,7 +397,7 @@ function createPagedSource(
     }
   }
 
-  const fetchMoreOnce = () => {
+  const fetchMoreOnce = (silent: boolean, priority: FetchPriority) => {
     if (inflight) return inflight
     if (allExhausted()) return Promise.resolve()
 
@@ -392,7 +409,9 @@ function createPagedSource(
     const cutoff = Math.max(...pending.map((index) => orgFrontier[index]))
     const targets = pending.filter((index) => orgFrontier[index] === cutoff)
 
-    inflight = Promise.all(targets.map(fetchOrg)).then(() => {
+    inflight = Promise.all(
+      targets.map((index) => fetchOrg(index, silent, priority))
+    ).then(() => {
       version++
       inflight = null
     })
@@ -400,7 +419,7 @@ function createPagedSource(
   }
 
   return {
-    ensure: async (count) => {
+    ensure: async (count, silent = false, priority = "auto") => {
       let rounds = 0
       while (
         committed().length < count &&
@@ -408,7 +427,7 @@ function createPagedSource(
         rounds < MAX_FETCH_ROUNDS_PER_LOAD
       ) {
         rounds++
-        await fetchMoreOnce()
+        await fetchMoreOnce(silent, priority)
       }
     },
     slice: (offset, limit) => committed().slice(offset, offset + limit),
@@ -673,6 +692,7 @@ export function HomeClient() {
   const orgsRef = useRef<Org[]>([])
   const orgsInflight = useRef<Promise<Org[]> | null>(null)
   const selectedHomeOrgsRef = useRef(selectedHomeOrgs)
+  const tabRef = useRef<TabValue>(tab)
   const homeStateRef = useRef<HomeStateSnapshot>({
     homeLive: [],
     homeError: null,
@@ -784,13 +804,25 @@ export function HomeClient() {
 
   const fetchHomeLive = useCallback(
     (
-      opts: { force?: boolean; minutes?: number; background?: boolean } = {}
+      opts: {
+        force?: boolean
+        minutes?: number
+        background?: boolean
+        silent?: boolean
+        priority?: FetchPriority
+      } = {}
     ) => {
       if (isDocumentHidden() && !opts.force) {
         return null
       }
 
-      const { force = false, minutes = 5, background = false } = opts
+      const {
+        force = false,
+        minutes = 5,
+        background = false,
+        silent = false,
+        priority = "high",
+      } = opts
       const orgTargets = resolveOrgTargets(selectedHomeOrgsRef.current)
       const nextCacheKey = makeLiveCacheKey(orgTargets)
       const current = homeStateRef.current
@@ -870,7 +902,12 @@ export function HomeClient() {
         )
       }
 
-      const request = fetchAllLive(requestTargets, HOME_LIVE_QUERY)
+      const request = fetchAllLive(
+        requestTargets,
+        HOME_LIVE_QUERY,
+        silent,
+        priority
+      )
         .then(async (response) => {
           if (seq !== homeFetchSeq.current) return
           const baseVideos = additiveSelection
@@ -880,7 +917,11 @@ export function HomeClient() {
             await commitLive(baseVideos)
             if (seq !== homeFetchSeq.current) return
           }
-          const enrichment = await enrichLiveVideosBestEffort(baseVideos, force)
+          const enrichment = await enrichLiveVideosBestEffort(
+            baseVideos,
+            force,
+            priority
+          )
           if (seq !== homeFetchSeq.current) return
           await commitLive(enrichment.videos)
           if (enrichment.lateResult) {
@@ -919,7 +960,9 @@ export function HomeClient() {
       page = 1,
       force = false,
       background = false,
-      reusableSelection: string[] = []
+      reusableSelection: string[] = [],
+      silent = false,
+      priority: FetchPriority = "high"
     ) => {
       const requestedPage = Math.max(1, page)
       const needed = requestedPage * PAGE_LENGTH
@@ -999,7 +1042,11 @@ export function HomeClient() {
         // known page numbers without disturbing the visible page.
         if (!exhausted) {
           void source
-            .ensure((finalPage + PREFETCH_PAGE_COUNT) * PAGE_LENGTH)
+            .ensure(
+              (finalPage + PREFETCH_PAGE_COUNT) * PAGE_LENGTH,
+              silent,
+              "low"
+            )
             .then(() => {
               if (seq !== tabFetchSeq.current[tabValue]) return
               void preloadVideoThumbnails(
@@ -1052,7 +1099,7 @@ export function HomeClient() {
       }
 
       try {
-        await source.ensure(needed)
+        await source.ensure(needed, silent, priority)
         if (seq !== tabFetchSeq.current[tabValue]) return
         commitPage()
       } catch (error) {
@@ -1075,30 +1122,81 @@ export function HomeClient() {
   // are currently hidden. Keep existing UI mounted while fresh data loads.
   const refreshAll = useCallback(() => {
     if (isDocumentHidden()) return
-    void fetchHomeLive({ force: true, background: true })
+    const activeTab = tabRef.current
+    if (activeTab === "live") {
+      void fetchHomeLive({
+        force: true,
+        background: true,
+        silent: true,
+        priority: "high",
+      })
+    } else {
+      void loadTabPage(
+        activeTab,
+        tabStatesRef.current[activeTab].currentPage,
+        true,
+        true,
+        [],
+        true,
+        "high"
+      )
+    }
+
+    if (activeTab !== "live") {
+      void fetchHomeLive({
+        force: true,
+        background: true,
+        silent: true,
+        priority: "low",
+      })
+    }
     for (const tabValue of ["archive", "clips"] as PagedTabValue[]) {
+      if (tabValue === activeTab) continue
       void loadTabPage(
         tabValue,
         tabStatesRef.current[tabValue].currentPage,
         true,
-        true
+        true,
+        [],
+        true,
+        "low"
       )
     }
   }, [fetchHomeLive, loadTabPage])
 
   const prefetchDraftOrgs = useCallback((draft: string[]) => {
     const current = new Set(resolveOrgTargets(selectedHomeOrgsRef.current))
-    for (const org of resolveOrgTargets(normalizeSelectedHomeOrgs(draft))) {
-      if (current.has(org)) continue
-      for (const tabValue of ["archive", "clips"] as PagedTabValue[]) {
-        prefetchApi("videos", {
+    const activeTab = tabRef.current
+    const prefetchPaged = (
+      tabValue: PagedTabValue,
+      org: string,
+      priority: FetchPriority
+    ) =>
+      prefetchApi(
+        "videos",
+        {
           ...buildTabQuery(tabValue),
           org,
           limit: HOLODEX_PAGE_LIMIT,
           offset: 0,
-        })
+        },
+        priority
+      )
+
+    for (const org of resolveOrgTargets(normalizeSelectedHomeOrgs(draft))) {
+      if (current.has(org)) continue
+      if (isPagedTabValue(activeTab)) {
+        prefetchPaged(activeTab, org, "high")
+      } else {
+        prefetchApi("live", { ...HOME_LIVE_QUERY, org, offset: 0 }, "high")
       }
-      prefetchApi("live", { ...HOME_LIVE_QUERY, org, offset: 0 })
+
+      if (activeTab !== "live") {
+        prefetchApi("live", { ...HOME_LIVE_QUERY, org, offset: 0 }, "low")
+      }
+      for (const tabValue of ["archive", "clips"] as PagedTabValue[]) {
+        if (tabValue !== activeTab) prefetchPaged(tabValue, org, "low")
+      }
     }
   }, [])
 
@@ -1115,18 +1213,23 @@ export function HomeClient() {
     const stale = () =>
       JSON.stringify(selectedHomeOrgsRef.current) !== selectionKey
     const refreshLive = () =>
-      fetchHomeLive({ force: true, background: true }) ?? Promise.resolve()
-    const refreshPaged = (tabValue: PagedTabValue) =>
-      loadTabPage(tabValue, 1, true, true, previousSelection)
-    const activeTab = tab
+      fetchHomeLive({ force: true, background: true, priority: "high" }) ??
+      Promise.resolve()
+    const refreshPaged = (
+      tabValue: PagedTabValue,
+      priority: FetchPriority
+    ) => loadTabPage(tabValue, 1, true, true, previousSelection, false, priority)
+    const activeTab = tabRef.current
     const primary =
-      activeTab === "live" ? refreshLive() : refreshPaged(activeTab)
+      activeTab === "live" ? refreshLive() : refreshPaged(activeTab, "high")
 
     void Promise.resolve(primary).then(() => {
       if (stale()) return
-      if (activeTab !== "live") void refreshLive()
+      if (activeTab !== "live") {
+        void fetchHomeLive({ force: true, background: true, priority: "low" })
+      }
       for (const tabValue of ["archive", "clips"] as PagedTabValue[]) {
-        if (tabValue !== activeTab) void refreshPaged(tabValue)
+        if (tabValue !== activeTab) void refreshPaged(tabValue, "low")
       }
     })
   }
@@ -1134,9 +1237,20 @@ export function HomeClient() {
   useEffect(() => {
     if (!storageHydrated) return
     void loadOrgs()
-    void fetchHomeLive({ force: true })
-    void loadTabPage("archive", 1)
-    void loadTabPage("clips", 1)
+    const activeTab = tabRef.current
+    if (activeTab === "live") {
+      void fetchHomeLive({ force: true, priority: "high" })
+    } else {
+      void loadTabPage(activeTab, 1, false, false, [], false, "high")
+    }
+    if (activeTab !== "live") {
+      void fetchHomeLive({ force: true, priority: "low" })
+    }
+    for (const tabValue of ["archive", "clips"] as PagedTabValue[]) {
+      if (tabValue !== activeTab) {
+        void loadTabPage(tabValue, 1, false, false, [], false, "low")
+      }
+    }
   }, [fetchHomeLive, loadOrgs, loadTabPage, storageHydrated])
 
   useEffect(() => {
@@ -1155,6 +1269,7 @@ export function HomeClient() {
 
   const changeTab = (value: string) => {
     const nextTab = value as TabValue
+    tabRef.current = nextTab
     if (isPagedTabValue(nextTab)) {
       const tabState = tabStatesRef.current[nextTab]
       if (!tabState.pages.size && !tabState.loading && !tabState.error) {

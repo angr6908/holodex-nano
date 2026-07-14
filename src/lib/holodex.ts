@@ -3,6 +3,7 @@ import { allVtubersOrg, normalizeOrgs } from "@/lib/orgs"
 import { dedupeVideos, isLiveInsideScheduleWindow } from "@/lib/video-utils"
 
 export const HOLODEX_PAGE_LIMIT = 100
+export type FetchPriority = NonNullable<RequestInit["priority"]>
 
 function qs(obj: Record<string, unknown> = {}) {
   const params = new URLSearchParams()
@@ -52,13 +53,15 @@ export function isFetchActive() {
 
 function fetchApi<T>(
   path: string,
-  query: Record<string, unknown> = {}
+  query: Record<string, unknown> = {},
+  silent = false,
+  priority: FetchPriority = "auto"
 ): Promise<T> {
-  return trackActivity(
-    fetch(`/api/v2/${path}?${qs(query)}`, {
-      headers: { accept: "application/json" },
-    }).then((response) => readJson<T>(response))
-  )
+  const request = fetch(`/api/v2/${path}?${qs(query)}`, {
+    headers: { accept: "application/json" },
+    priority,
+  }).then((response) => readJson<T>(response))
+  return silent || priority === "low" ? request : trackActivity(request)
 }
 
 const PREFETCH_TTL_MS = 30_000
@@ -73,14 +76,18 @@ function prefetchKey(path: string, query: Record<string, unknown>) {
   return `${path}?${params.toString()}`
 }
 
-export function prefetchApi(path: string, query: Record<string, unknown> = {}) {
+export function prefetchApi(
+  path: string,
+  query: Record<string, unknown> = {},
+  priority: FetchPriority = "auto"
+) {
   const now = Date.now()
   for (const [key, entry] of prefetchCache) {
     if (now - entry.at >= PREFETCH_TTL_MS) prefetchCache.delete(key)
   }
   const key = prefetchKey(path, query)
   if (prefetchCache.has(key)) return
-  const promise = fetchApi<unknown>(path, query)
+  const promise = fetchApi<unknown>(path, query, false, priority)
   promise.catch(() => prefetchCache.delete(key))
   prefetchCache.set(key, { promise, at: now })
 }
@@ -105,7 +112,9 @@ export function fetchOrgs(): Promise<Org[]> {
 }
 
 async function fetchAllPages(
-  query: Record<string, unknown>
+  query: Record<string, unknown>,
+  silent = false,
+  priority: FetchPriority = "auto"
 ): Promise<HolodexVideo[]> {
   const limit = Number(query.limit) || HOLODEX_PAGE_LIMIT
   const all: HolodexVideo[] = []
@@ -113,7 +122,7 @@ async function fetchAllPages(
   while (true) {
     const pageQuery = { ...query, offset }
     const raw = await (takePrefetched<HolodexVideo[]>("live", pageQuery) ??
-      fetchApi<HolodexVideo[]>("live", pageQuery))
+      fetchApi<HolodexVideo[]>("live", pageQuery, silent, priority))
     all.push(...raw.filter(isLiveInsideScheduleWindow))
     if (raw.length < limit) break
     offset += limit
@@ -123,15 +132,17 @@ async function fetchAllPages(
 
 export async function fetchAllLive(
   orgs: string[] = [],
-  query: Record<string, unknown> = {}
+  query: Record<string, unknown> = {},
+  silent = false,
+  priority: FetchPriority = "auto"
 ): Promise<HolodexVideo[]> {
   const targets = (orgs || []).filter(Boolean)
   if (targets.length === 0 || targets.includes(allVtubersOrg.name)) {
-    return fetchAllPages({ ...query, org: allVtubersOrg.name })
+    return fetchAllPages({ ...query, org: allVtubersOrg.name }, silent, priority)
   }
 
   const responses = await Promise.allSettled(
-    targets.map((org) => fetchAllPages({ ...query, org }))
+    targets.map((org) => fetchAllPages({ ...query, org }, silent, priority))
   )
 
   const fulfilled = responses
@@ -152,8 +163,13 @@ export async function fetchAllLive(
     : new Error("Holodex live load failed")
 }
 
-export function fetchVideos(query: Record<string, unknown> = {}) {
+export function fetchVideos(
+  query: Record<string, unknown> = {},
+  silent = false,
+  priority: FetchPriority = "auto"
+) {
   return (
-    takePrefetched<unknown>("videos", query) ?? fetchApi<unknown>("videos", query)
+    takePrefetched<unknown>("videos", query) ??
+    fetchApi<unknown>("videos", query, silent, priority)
   )
 }
