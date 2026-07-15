@@ -160,7 +160,7 @@ function VideoCardComponent({
         {...anchorHandlers}
       >
         {image ? (
-          // eslint-disable-next-line @next/next/no-img-element
+          // biome-ignore lint/performance/noImgElement: thumbnails are remote and sized by CSS; next/image adds no value here
           <img
             src={image}
             width={640}
