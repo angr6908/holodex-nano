@@ -300,7 +300,7 @@ function buildTabQuery(tabValue: PagedTabValue): Record<string, unknown> {
   return {
     status: isArchive ? "past,missing" : "past",
     type: isArchive ? "stream" : "clip",
-    lang: isArchive ? "en" : undefined,
+    lang: isArchive ? "en" : "en,ja",
     paginated: false,
     max_upcoming_hours: 1,
   }
