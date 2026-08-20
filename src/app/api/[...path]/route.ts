@@ -6,7 +6,6 @@ import {
   upstreamResponse,
 } from "@/lib/holodex-proxy"
 
-export const runtime = "nodejs"
 
 async function proxy(
   request: NextRequest,

@@ -1,6 +1,5 @@
 import { TWITCH_GQL_URL, TWITCH_WEB_CLIENT_ID } from "@/lib/twitch"
 
-export const runtime = "nodejs"
 
 export async function POST(request: Request) {
   const body = await request.text()
